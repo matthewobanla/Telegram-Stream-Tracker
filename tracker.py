@@ -43,6 +43,8 @@ AUTO_POST_REPORT = bool(os.getenv("AUTO_POST_REPORT", getattr(config, "AUTO_POST
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", getattr(config, "ADMIN_CHAT_ID", "@KingmattMO"))
 AUTO_POST_TO_GROUP = bool(os.getenv("AUTO_POST_TO_GROUP", getattr(config, "AUTO_POST_TO_GROUP", False)))
 CSV_OUTPUT_DIR = os.getenv("CSV_OUTPUT_DIR", config.CSV_OUTPUT_DIR)
+MIN_ATTENDANCE_SECONDS = int(os.getenv("MIN_ATTENDANCE_SECONDS", getattr(config, "MIN_ATTENDANCE_SECONDS", 30)))
+EXCLUDE_PREVIEWS_FROM_CSV = bool(os.getenv("EXCLUDE_PREVIEWS_FROM_CSV", getattr(config, "EXCLUDE_PREVIEWS_FROM_CSV", False)))
 
 os.makedirs(CSV_OUTPUT_DIR, exist_ok=True)
 db.init_db()
@@ -131,7 +133,7 @@ class CallSessionTracker:
 
     def end_call(self):
         if not self.is_call_active():
-            return
+            return None, None
         now = datetime.datetime.now(datetime.timezone.utc)
         self.call_end_time = now
 
@@ -158,13 +160,23 @@ class CallSessionTracker:
 
         filename = f"report_{stats['start_time'].strftime('%Y%m%d_%H%M%S')}.csv"
         filepath = os.path.join(CSV_OUTPUT_DIR, filename)
+
+        all_participants = stats["participants"]
+        valid_attendees = [p for p in all_participants if p.get("total_sec", 0) >= MIN_ATTENDANCE_SECONDS]
+        preview_attendees = [p for p in all_participants if p.get("total_sec", 0) < MIN_ATTENDANCE_SECONDS]
+
         with open(filepath, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["Rank", "User ID", "Name", "Username", "First Join (UTC)", "Last Leave (UTC)", "Session Count", "Total Duration (Minutes)", "Participation (%)"])
-            for rank, p in enumerate(stats["participants"], 1):
-                writer.writerow([rank, p["uid"], p["name"], p["username"], p["first_join"], p["last_leave"], p["session_count"], f"{p['total_min']:.2f}", f"{p['pct']:.2f}"])
+            writer.writerow(["Rank", "User ID", "Name", "Username", "First Join (UTC)", "Last Leave (UTC)", "Session Count", "Total Duration (Minutes)", "Participation (%)", "Attendance Status"])
+            for rank, p in enumerate(valid_attendees, 1):
+                writer.writerow([rank, p["uid"], p["name"], p["username"], p["first_join"], p["last_leave"], p["session_count"], f"{p['total_min']:.2f}", f"{p['pct']:.2f}", "Attended"])
+            
+            if not EXCLUDE_PREVIEWS_FROM_CSV:
+                for p in preview_attendees:
+                    writer.writerow(["-", p["uid"], p["name"], p["username"], p["first_join"], p["last_leave"], p["session_count"], f"{p['total_min']:.2f}", f"{p['pct']:.2f}", f"Brief Preview (<{MIN_ATTENDANCE_SECONDS}s)"])
+
         self.last_csv_path = filepath
-        print(f"\n[CSV Exported] Successfully saved to: {os.path.abspath(filepath)}")
+        print(f"\n[CSV Exported] Successfully saved to: {os.path.abspath(filepath)} (Attendees: {len(valid_attendees)}, Previews: {len(preview_attendees)})")
         return filepath
 
     def get_current_stats(self):
@@ -216,9 +228,13 @@ class CallSessionTracker:
         if not stats or not stats["participants"]:
             return
 
+        all_participants = stats["participants"]
+        valid_attendees = [p for p in all_participants if p.get("total_sec", 0) >= MIN_ATTENDANCE_SECONDS]
+        brief_count = len(all_participants) - len(valid_attendees)
+
         headers = ["Rank", "Name", "Username", "First Join", "Last Leave", "Sessions", "Total Time", "Participation"]
         table_rows = []
-        for rank, p in enumerate(stats["participants"], 1):
+        for rank, p in enumerate(valid_attendees, 1):
             table_rows.append([
                 rank,
                 p["name"][:25],
@@ -235,9 +251,12 @@ class CallSessionTracker:
         print(f"  Start Time : {stats['start_time'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
         print(f"  End Time   : {stats['end_time'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
         print(f"  Duration   : {stats['total_min']:.2f} minutes ({int(stats['total_sec'])} seconds)")
-        print(f"  Total Users: {len(stats['participants'])}")
+        print(f"  Attendees  : {len(valid_attendees)} (plus {brief_count} previewers < {MIN_ATTENDANCE_SECONDS}s)")
         print("=" * 80)
-        print(tabulate(table_rows, headers=headers, tablefmt="fancy_grid"))
+        if table_rows:
+            print(tabulate(table_rows, headers=headers, tablefmt="fancy_grid"))
+        else:
+            print(f"  No attendees exceeded the {MIN_ATTENDANCE_SECONDS}s threshold.")
         print("=" * 80 + "\n")
 
 tracker = CallSessionTracker()
@@ -285,17 +304,37 @@ def format_report_message(stream_meta, participants, is_active=False):
     start_dt = datetime.datetime.fromisoformat(stream_meta["start_time"]) if isinstance(stream_meta["start_time"], str) else stream_meta["start_time"]
     dur_min = stream_meta.get("duration_sec", 0) / 60.0 if not is_active else stream_meta.get("total_min", 0)
 
+    # Separate genuine attendees from brief previews (< MIN_ATTENDANCE_SECONDS)
+    valid_participants = []
+    brief_count = 0
+    for p in (participants or []):
+        total_s = p.get("total_sec", 0)
+        if not total_s and p.get("total_min"):
+            total_s = p.get("total_min") * 60.0
+        if total_s >= MIN_ATTENDANCE_SECONDS:
+            valid_participants.append(p)
+        else:
+            brief_count += 1
+
     msg = f"📊 **Live Stream Participation Report** ({status_tag})\n\n"
     msg += f"⏱ **Duration**: `{dur_min:.1f} mins`\n"
-    msg += f"👥 **Total Participants**: `{len(participants)}`\n"
+
+    if brief_count > 0:
+        msg += f"👥 **Attendees**: `{len(valid_participants)}` _(+{brief_count} brief previews <{MIN_ATTENDANCE_SECONDS}s)_\n"
+    else:
+        msg += f"👥 **Total Attendees**: `{len(valid_participants)}`\n"
+
     msg += f"📅 **Started**: `{start_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}`\n\n"
     msg += "🏆 **Participant Leaderboard**:\n"
 
-    if not participants:
-        msg += "_No participants recorded for this session._\n"
+    if not valid_participants:
+        if brief_count > 0:
+            msg += f"_No attendees stayed longer than {MIN_ATTENDANCE_SECONDS}s ({brief_count} previewers recorded in CSV)._\n"
+        else:
+            msg += "_No participants recorded for this session._\n"
         return msg
 
-    for rank, p in enumerate(participants[:20], 1):
+    for rank, p in enumerate(valid_participants[:20], 1):
         uname = f" (@{p['username']})" if p.get('username') else ""
         dot = "🟢" if p.get("is_online") else "⚪️"
         total_m = p.get("total_min", 0)
@@ -304,12 +343,14 @@ def format_report_message(stream_meta, participants, is_active=False):
         msg += f"`#{rank:02d}` {dot} **{p['name']}**{uname}\n"
         msg += f"      └ ⏳ `{total_m:.1f}m` ({pct_val:.1f}%) | 🚪 `{sess_c}` joins\n"
 
-    if len(participants) > 20:
-        msg += f"\n_...and {len(participants) - 20} more participants in CSV export._"
+    if len(valid_participants) > 20:
+        msg += f"\n_...and {len(valid_participants) - 20} more attendees in CSV export._"
+    elif brief_count > 0 and not EXCLUDE_PREVIEWS_FROM_CSV:
+        msg += f"\n_Note: {brief_count} brief previewers (<{MIN_ATTENDANCE_SECONDS}s) archived in CSV spreadsheet._"
 
     return msg
 
-async def send_auto_report(csv_path):
+async def send_auto_report(csv_path, expected_stream_id=None):
     """Sends the post-stream report and CSV directly to configured admin(s) and/or target chat."""
     if not AUTO_POST_REPORT:
         return
@@ -317,6 +358,15 @@ async def send_auto_report(csv_path):
     try:
         stream_meta, participants = db.get_latest_stream()
         if not stream_meta or not participants:
+            return
+
+        if expected_stream_id and stream_meta.get("stream_id") != expected_stream_id:
+            print(f"[Auto-Report] Skipped sending report: latest stream '{stream_meta.get('stream_id')}' does not match expected '{expected_stream_id}'")
+            return
+
+        # Ignore accidental or phantom 0-second / empty streams
+        if stream_meta.get("duration_sec", 0) < 5 and len(participants) == 0:
+            print("[Auto-Report] Skipped auto-report for negligible empty stream session.")
             return
 
         report_text = format_report_message(stream_meta, participants, is_active=False)
@@ -548,6 +598,12 @@ async def bot_command_handler(event):
 @user_client.on(events.Raw)
 async def raw_event_handler(event):
     if isinstance(event, types.UpdateGroupCallParticipants):
+        call_obj = getattr(event, "call", None)
+        call_id = getattr(call_obj, "id", None)
+        # If we have an active call tracked, only process updates matching our active call ID
+        if tracker.is_call_active() and call_id is not None and call_id != tracker.active_call_id:
+            return
+
         for p in event.participants:
             peer = p.peer
             pid, name, username = await resolve_peer_info(user_client, peer)
@@ -560,18 +616,30 @@ async def raw_event_handler(event):
                 tracker.register_join(pid, name, username)
 
     elif isinstance(event, types.UpdateGroupCall):
-        if getattr(event.call, "duration", None) is not None:
-            ended_stream_id, csv_file = tracker.end_call()
-            if AUTO_POST_REPORT:
-                asyncio.create_task(send_auto_report(csv_file))
+        call_obj = getattr(event, "call", None)
+        call_id = getattr(call_obj, "id", None)
+        
+        # Only process if this update belongs to our active tracked call
+        if tracker.is_call_active() and (call_id is None or call_id == tracker.active_call_id):
+            # Telegram signals an ended call with GroupCallDiscarded or discarded=True
+            is_discarded = isinstance(call_obj, types.GroupCallDiscarded) or getattr(call_obj, "discarded", False)
+            if is_discarded:
+                print(f"\n[Raw Event] Received GroupCallDiscarded for active call ID {call_id}.")
+                ended_stream_id, csv_file = tracker.end_call()
+                if ended_stream_id and AUTO_POST_REPORT:
+                    asyncio.create_task(send_auto_report(csv_file, expected_stream_id=ended_stream_id))
 
 async def background_poll_loop(target_entity):
+    consecutive_empty_polls = 0
+    POLL_MISS_THRESHOLD = 3  # Require 3 consecutive empty polls (~24s) before declaring call ended
+
     while True:
         try:
             full_chat = await user_client(functions.channels.GetFullChannelRequest(channel=target_entity))
             group_call = full_chat.full_chat.call
 
             if group_call:
+                consecutive_empty_polls = 0
                 call_id = getattr(group_call, "id", None)
                 if not tracker.is_call_active() or tracker.active_call_id != call_id:
                     chat_title = getattr(target_entity, "title", str(TARGET_CHAT))
@@ -633,9 +701,15 @@ async def background_poll_loop(target_entity):
                         tracker.register_leave(uid)
             else:
                 if tracker.is_call_active():
-                    ended_stream_id, csv_file = tracker.end_call()
-                    if AUTO_POST_REPORT:
-                        asyncio.create_task(send_auto_report(csv_file))
+                    consecutive_empty_polls += 1
+                    if consecutive_empty_polls >= POLL_MISS_THRESHOLD:
+                        print(f"\n[Polling Notice] Confirmed call ended ({consecutive_empty_polls}/{POLL_MISS_THRESHOLD} empty polls). Finalizing stream...")
+                        consecutive_empty_polls = 0
+                        ended_stream_id, csv_file = tracker.end_call()
+                        if ended_stream_id and AUTO_POST_REPORT:
+                            asyncio.create_task(send_auto_report(csv_file, expected_stream_id=ended_stream_id))
+                    else:
+                        print(f"[Polling Notice] Call not detected in full chat info ({consecutive_empty_polls}/{POLL_MISS_THRESHOLD} checks). Verifying before ending...")
 
         except Exception as e:
             print(f"[Polling Notice] {type(e).__name__}: {e}")

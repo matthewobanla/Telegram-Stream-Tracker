@@ -30,6 +30,12 @@ AUTO_POST_TO_GROUP = os.getenv("AUTO_POST_TO_GROUP", "False").lower() in ("true"
 # Legacy compatibility
 AUTO_POST_REPORT_TO_CHAT = AUTO_POST_REPORT
 
+# Minimum attendance threshold (in seconds) to be counted as a genuine attendee (Default: 30s)
+MIN_ATTENDANCE_SECONDS = int(os.getenv("MIN_ATTENDANCE_SECONDS", 30))
+
+# Whether to completely exclude brief previewers (< MIN_ATTENDANCE_SECONDS) from CSV exports (Default: False)
+EXCLUDE_PREVIEWS_FROM_CSV = os.getenv("EXCLUDE_PREVIEWS_FROM_CSV", "False").lower() in ("true", "1", "yes")
+
 # Reports directory on disk
 EXPORT_CSV = True
 CSV_OUTPUT_DIR = os.getenv("CSV_OUTPUT_DIR", "reports")
