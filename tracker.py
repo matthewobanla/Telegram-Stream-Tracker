@@ -739,9 +739,60 @@ def build_back_button(refresh_key=None):
     row.append(Button.inline("« Back to Menu", b"menu_main"))
     return [row]
 
+async def is_sender_admin_or_owner(event):
+    """Verifies whether the sender is a Telegram group administrator/creator or a configured bot admin."""
+    if event.is_private:
+        return True
+
+    sender_id = event.sender_id
+    if not sender_id:
+        return False
+
+    # Anonymous group admin posting as the group channel
+    if sender_id == event.chat_id:
+        return True
+
+    # 1. Check if user is in bot's configured admin recipients / owner list
+    try:
+        sender = await event.get_sender()
+        username = getattr(sender, "username", "")
+        all_admins = get_all_admin_recipients()
+        admin_keys = [str(a).lower().lstrip("@") for a in all_admins]
+        if str(sender_id) in admin_keys or (username and username.lower() in admin_keys):
+            return True
+    except Exception:
+        pass
+
+    # 2. Check Telegram native group admin permissions
+    try:
+        client = getattr(event, "client", bot_client)
+        perms = await client.get_permissions(event.chat_id, sender_id)
+        if perms and (perms.is_admin or perms.is_creator or getattr(perms, "admin_rights", None)):
+            return True
+    except Exception as e:
+        # Fallback: check if chat creator
+        try:
+            chat = await event.get_chat()
+            if getattr(chat, "creator", False):
+                return True
+        except Exception:
+            pass
+
+    return False
+
 # --- INLINE KEYBOARD BUTTON CALLBACK HANDLER ---
 @bot_client.on(events.CallbackQuery)
 async def bot_callback_handler(event):
+    # Restrict button interactions in groups to administrators
+    if not event.is_private:
+        is_admin = await is_sender_admin_or_owner(event)
+        if not is_admin:
+            try:
+                await event.answer("⛔️ Only group administrators can use these controls.", alert=True)
+            except Exception:
+                pass
+            return
+
     data = event.data
     try:
         await event.answer()
@@ -906,6 +957,18 @@ async def bot_command_handler(event):
     raw_cmd = text.split()[0].lower().replace(".", "/")
     cmd = raw_cmd.split("@")[0]
     print(f"[BOT COMMAND] Received '{raw_cmd}' from chat_id={event.chat_id}")
+
+    # Restrict commands in groups/channels to administrators only
+    if not event.is_private:
+        is_admin = await is_sender_admin_or_owner(event)
+        if not is_admin:
+            print(f"[ACCESS DENIED] User {event.sender_id} is not an admin in chat {event.chat_id}")
+            await safe_reply(
+                event,
+                "⛔️ **Admin Access Required**\nOnly group administrators or authorized bot admins can execute bot commands in this group.",
+                parse_mode="markdown"
+            )
+            return
 
     # 1. GROUP MANAGEMENT COMMANDS
     if cmd in ["/groups", "/listgroups", "/trackedgroups"]:
