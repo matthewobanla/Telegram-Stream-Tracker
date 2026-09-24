@@ -564,6 +564,28 @@ async def safe_reply(event, text, file=None, **kwargs):
                 print(f"[Bot Reply Error] Failed to send reply: {e2}")
             break
 
+def get_help_menu():
+    return (
+        "🤖 **Telegram Live Stream Tracker (Kronos Bot)**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "**📊 Attendance & Reports**\n"
+        "• `/menu` or `/help` — Display this command menu\n"
+        "• `/stats` or `/report` — View participant leaderboard & attendance %\n"
+        "• `/livestatus` — Check live voice chat status across all tracked groups\n"
+        "• `/export` or `/csv` — Download the attendance CSV spreadsheet\n\n"
+        "**👥 Group Tracking Management**\n"
+        "• `/groups` — List all monitored groups & live stream state\n"
+        "• `/trackhere` — *(In Group)* Start tracking current group immediately\n"
+        "• `/addgroup @group` — Add a group by username or Chat ID\n"
+        "• `/removegroup @group` — Remove a group from tracking\n\n"
+        "**👑 Admin Report Routing**\n"
+        "• `/admins` — View list of admins receiving automated reports\n"
+        "• `/addadmin @username` — Add an admin to receive reports in DM\n"
+        "• `/removeadmin @username` — Remove an admin from report delivery\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "_Tip: Tap any command above or use the [/] menu button to run instantly._"
+    )
+
 # --- IN-TELEGRAM COMMAND HANDLERS ---
 @bot_client.on(events.NewMessage)
 async def bot_command_handler(event):
@@ -573,24 +595,7 @@ async def bot_command_handler(event):
 
     # If it's a private chat (DM) and user sends any text without a slash, reply with the menu
     if event.is_private and not (text.startswith("/") or text.startswith(".")):
-        help_text = (
-            "🤖 **Telegram Live Stream Tracker Bot (Multi-Group Ready)**\n\n"
-            "**📊 Stream Reports & Live Stats:**\n"
-            "• `/stats` or `/report` - Show participant leaderboard & participation %\n"
-            "• `/livestatus` - Check live voice chat status across all tracked groups\n"
-            "• `/export` or `/csv` - Download the CSV participation spreadsheet\n\n"
-            "**👥 Group Tracking Management:**\n"
-            "• `/groups` - View all currently tracked groups and their live status\n"
-            "• `/trackhere` - (In group) Start tracking this group immediately\n"
-            "• `/addgroup @group` - Add a group/channel by username or ID\n"
-            "• `/removegroup @group` - Remove a group from tracking\n\n"
-            "**👑 Admin Routing Options:**\n"
-            "• `/admins` - View list of admins receiving auto-reports\n"
-            "• `/addadmin @username` - Add an admin to receive reports in DM\n"
-            "• `/removeadmin @username` - Remove an admin from reports\n"
-            "• `/help` - Show this menu"
-        )
-        await safe_reply(event, help_text, parse_mode="markdown")
+        await safe_reply(event, get_help_menu(), parse_mode="markdown")
         return
 
     if not (text.startswith("/") or text.startswith(".")):
@@ -813,26 +818,9 @@ async def bot_command_handler(event):
             else:
                 await safe_reply(event, f"⚠️ `{target_to_remove}` was not found in database admin list.\nType `/admins` to view the list.", parse_mode="markdown")
 
-    # 6. HELP & START COMMAND
-    elif cmd in ["/help", "/start"]:
-        help_text = (
-            "🤖 **Telegram Live Stream Tracker Bot (Multi-Group Ready)**\n\n"
-            "**📊 Stream Reports & Live Stats:**\n"
-            "• `/stats` or `/report` - Show latest participant leaderboard & participation %\n"
-            "• `/livestatus` - Check live voice chat status across all tracked groups\n"
-            "• `/export` or `/csv` - Download the CSV participation spreadsheet\n\n"
-            "**👥 Group Tracking Management:**\n"
-            "• `/groups` - View all currently tracked groups and their live status\n"
-            "• `/trackhere` - (In group) Start tracking this group immediately\n"
-            "• `/addgroup @group` - Add a group/channel by username or ID\n"
-            "• `/removegroup @group` - Remove a group from tracking\n\n"
-            "**👑 Admin Routing Options:**\n"
-            "• `/admins` - View list of admins receiving auto-reports\n"
-            "• `/addadmin @username` - Add an admin to receive reports in DM\n"
-            "• `/removeadmin @username` - Remove an admin from reports\n"
-            "• `/help` - Show this menu"
-        )
-        await safe_reply(event, help_text, parse_mode="markdown")
+    # 6. HELP, START & MENU COMMANDS
+    elif cmd in ["/menu", "/help", "/start", "/commands", "/options"]:
+        await safe_reply(event, get_help_menu(), parse_mode="markdown")
 
 # --- USER CLIENT LIVE CALL POLLING & EVENTS ---
 @user_client.on(events.Raw)
@@ -980,6 +968,27 @@ async def background_poll_loop():
 
         await asyncio.sleep(8)
 
+async def register_bot_commands():
+    try:
+        commands = [
+            types.BotCommand(command="menu", description="Show full command guide & navigation"),
+            types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
+            types.BotCommand(command="livestatus", description="Check live status of all tracked groups"),
+            types.BotCommand(command="groups", description="List all monitored groups & stream state"),
+            types.BotCommand(command="export", description="Download CSV attendance spreadsheet"),
+            types.BotCommand(command="admins", description="List admin recipients for reports"),
+            types.BotCommand(command="addadmin", description="Add an admin to receive post-stream reports"),
+            types.BotCommand(command="trackhere", description="Start tracking current group (run in group)"),
+            types.BotCommand(command="help", description="Show full help & usage guide")
+        ]
+        await bot_client(functions.bots.SetBotCommandsRequest(
+            scope=types.BotCommandScopeDefault(),
+            lang_code="",
+            commands=commands
+        ))
+    except Exception:
+        pass
+
 async def try_start_bot():
     global bot_active
     try:
@@ -988,6 +997,7 @@ async def try_start_bot():
         bot_me = await bot_client.get_me()
         bot_active = True
         print(f"[UI Bot Online]  : @{bot_me.username} ({bot_me.first_name})")
+        asyncio.create_task(register_bot_commands())
     except errors.FloodWaitError as e:
         print(f"[Bot Cooldown]   : Telegram rate-limit for new bot login ({e.seconds}s). Running stream monitor in the meantime...")
         bot_active = False

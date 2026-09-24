@@ -163,6 +163,7 @@ Members and admins can use the following commands in any group or in private DM 
 
 | Command | Description |
 | :--- | :--- |
+| **`/menu`** or **`/help`** | Displays the full interactive command guide and menu. |
 | **`/trackhere`** | *(In Group)* Immediately starts tracking attendance for the current group. |
 | **`/addgroup @group`** | Adds a target group/channel by username or Chat ID to active tracking. |
 | **`/removegroup @group`** | Removes a group from tracking. |
@@ -173,7 +174,6 @@ Members and admins can use the following commands in any group or in private DM 
 | **`/admins`** | Lists all configured admins receiving auto-reports. |
 | **`/addadmin @user`** | Adds an admin to receive post-stream reports & CSVs in private DM. |
 | **`/removeadmin @user`** | Removes an admin from report delivery. |
-| **`/help`** | Displays the available commands and help menu. |
 
 ---
 
