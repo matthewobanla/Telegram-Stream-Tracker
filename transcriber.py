@@ -31,6 +31,44 @@ def set_active_engine(engine_name):
         return True
     return False
 
+# Cache for dynamically discovered Gemini models
+_cached_gemini_models = None
+
+def get_available_gemini_models(api_key):
+    """
+    Dynamically queries Google Gemini API to discover active models supporting generateContent.
+    Returns a list of (model_clean_name, api_version) tuples.
+    """
+    global _cached_gemini_models
+    if _cached_gemini_models is not None:
+        return _cached_gemini_models
+
+    discovered = []
+    for api_ver in ["v1beta", "v1"]:
+        try:
+            url = f"https://generativelanguage.googleapis.com/{api_ver}/models?key={api_key}"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Telegram-Stream-Tracker"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                for item in data.get("models", []):
+                    methods = item.get("supportedGenerationMethods", [])
+                    if "generateContent" in methods:
+                        raw_name = item.get("name", "")
+                        clean_name = raw_name.replace("models/", "").strip()
+                        pair = (clean_name, api_ver)
+                        if pair not in discovered:
+                            discovered.append(pair)
+        except Exception:
+            continue
+
+    if discovered:
+        _cached_gemini_models = discovered
+        return discovered
+    return []
+
 # --- 1. GEMINI TRANSCRIBER & SUMMARIZER ---
 async def transcribe_and_summarize_gemini(audio_path, chat_title="Voice Stream"):
     """
@@ -89,8 +127,15 @@ Please provide your output in TWO clearly separated sections:
 (Provide the full verbatim or near-verbatim transcription of everything spoken during the call, with speaker labels/timestamps if discernible)
 """
 
-    model_candidates = [
-        os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip(),
+    preferred_model = os.getenv("GEMINI_MODEL", "").strip()
+
+    # Priority list of model candidates
+    default_candidates = [
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-2.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-2.5-pro",
         "gemini-1.5-flash-latest",
         "gemini-1.5-flash",
         "gemini-2.0-flash",
@@ -98,10 +143,23 @@ Please provide your output in TWO clearly separated sections:
         "gemini-1.5-pro",
         "gemini-2.0-flash-exp"
     ]
-    models_to_try = []
-    for m in model_candidates:
-        if m and m not in models_to_try:
-            models_to_try.append(m)
+
+    target_pairs = []
+    if preferred_model:
+        target_pairs.append((preferred_model, "v1beta"))
+        target_pairs.append((preferred_model, "v1"))
+
+    # Dynamically fetch available models from the API for the given key
+    discovered_pairs = get_available_gemini_models(api_key)
+    for model_name, api_ver in discovered_pairs:
+        if (model_name, api_ver) not in target_pairs:
+            target_pairs.append((model_name, api_ver))
+
+    # Add default candidates as fallback
+    for model_name in default_candidates:
+        for api_ver in ["v1beta", "v1"]:
+            if (model_name, api_ver) not in target_pairs:
+                target_pairs.append((model_name, api_ver))
 
     payload = {
         "contents": [{
@@ -137,26 +195,23 @@ Please provide your output in TWO clearly separated sections:
 
     loop = asyncio.get_running_loop()
 
-    for model_name in models_to_try:
-        for api_ver in ["v1beta", "v1"]:
-            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={api_key}"
-            try:
-                res_json = await loop.run_in_executor(None, _try_post, url)
-                if res_json and "candidates" in res_json:
-                    used_model_name = f"{model_name} ({api_ver})"
-                    break
-            except urllib.error.HTTPError as he:
-                err_body = he.read().decode("utf-8")
-                last_error = f"Gemini API error ({he.code}) on {model_name} ({api_ver}): {err_body}"
-                if he.code in (404, 400):
-                    continue
-                else:
-                    continue
-            except Exception as e:
-                last_error = f"Gemini request error on {model_name}: {e}"
+    for model_name, api_ver in target_pairs:
+        url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={api_key}"
+        try:
+            res_json = await loop.run_in_executor(None, _try_post, url)
+            if res_json and "candidates" in res_json:
+                used_model_name = f"{model_name} ({api_ver})"
+                break
+        except urllib.error.HTTPError as he:
+            err_body = he.read().decode("utf-8")
+            last_error = f"Gemini API error ({he.code}) on {model_name} ({api_ver}): {err_body}"
+            if he.code in (404, 400):
                 continue
-        if res_json and "candidates" in res_json:
-            break
+            else:
+                continue
+        except Exception as e:
+            last_error = f"Gemini request error on {model_name}: {e}"
+            continue
 
     if not res_json or not res_json.get("candidates"):
         raise RuntimeError(last_error or "All Gemini model endpoints failed.")
@@ -314,23 +369,42 @@ Provide the summary formatted as:
                 return data["candidates"][0]["content"]["parts"][0]["text"]
 
         loop = asyncio.get_running_loop()
-        models_to_try = [
-            os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip(),
+        preferred_model = os.getenv("GEMINI_MODEL", "").strip()
+        default_candidates = [
+            "gemini-2.5-flash",
+            "gemini-flash-latest",
+            "gemini-2.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-2.5-pro",
             "gemini-1.5-flash-latest",
             "gemini-1.5-flash",
             "gemini-2.0-flash",
             "gemini-1.5-flash-8b",
             "gemini-1.5-pro"
         ]
-        for m in models_to_try:
+        target_pairs = []
+        if preferred_model:
+            target_pairs.append((preferred_model, "v1beta"))
+            target_pairs.append((preferred_model, "v1"))
+
+        discovered_pairs = get_available_gemini_models(api_key)
+        for model_name, api_ver in discovered_pairs:
+            if (model_name, api_ver) not in target_pairs:
+                target_pairs.append((model_name, api_ver))
+
+        for model_name in default_candidates:
             for api_ver in ["v1beta", "v1"]:
-                url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{m}:generateContent?key={api_key}"
-                try:
-                    summary_text = await loop.run_in_executor(None, _sync_summary, url)
-                    if summary_text:
-                        return summary_text
-                except Exception:
-                    continue
+                if (model_name, api_ver) not in target_pairs:
+                    target_pairs.append((model_name, api_ver))
+
+        for model_name, api_ver in target_pairs:
+            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={api_key}"
+            try:
+                summary_text = await loop.run_in_executor(None, _sync_summary, url)
+                if summary_text:
+                    return summary_text
+            except Exception:
+                continue
 
     # Fallback to simple text outline if no LLM key
     lines = [s.strip() for s in transcript_text.split(".") if len(s.strip()) > 10]
@@ -361,7 +435,7 @@ async def process_audio_file(audio_path, chat_title="Voice Stream", stream_id=No
     if preferred == "gemini":
         try:
             result = await transcribe_and_summarize_gemini(audio_path, chat_title=chat_title)
-            engine_used = "Gemini 1.5 Flash"
+            engine_used = result.get("engine", "Gemini AI")
         except Exception as e:
             errors.append(f"Gemini failed ({e})")
 
@@ -398,7 +472,7 @@ async def process_audio_file(audio_path, chat_title="Voice Stream", stream_id=No
         if "gemini" not in preferred and os.getenv("GEMINI_API_KEY", GEMINI_API_KEY):
             try:
                 result = await transcribe_and_summarize_gemini(audio_path, chat_title=chat_title)
-                engine_used = "Gemini 1.5 Flash (Fallback)"
+                engine_used = f"{result.get('engine', 'Gemini AI')} (Fallback)"
             except Exception as e:
                 errors.append(f"Gemini fallback failed ({e})")
 
