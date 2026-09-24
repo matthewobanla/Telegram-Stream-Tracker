@@ -334,29 +334,67 @@ tracker_manager = MultiCallManager()
 tracked_entities = {}  # str(entity_id) -> {"target": target, "entity": entity, "title": title}
 tracked_targets_map = {} # target (lowercase/str) -> entity
 
-async def resolve_and_add_target(target_val, added_by="Owner"):
+async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
     """Resolves a target group/channel and adds it to the active tracking list and database."""
     global user_client, tracked_entities, tracked_targets_map
     target_str = str(target_val).strip()
     if not target_str:
         return False, "Target cannot be empty."
 
-    # Parse numeric vs string
-    if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
-        lookup = int(target_str)
-    else:
-        lookup = target_str
+    entity = None
 
-    try:
-        entity = await user_client.get_entity(lookup)
+    # 1. Check if chat_hint has username or if target_str is username
+    username_hint = getattr(chat_hint, "username", "") if chat_hint else ""
+    clean_target = target_str.lstrip("@").lower()
+    clean_id = str(target_str).replace("-100", "").replace("-", "")
+
+    if target_str.startswith("@"):
+        try:
+            entity = await user_client.get_entity(target_str)
+        except Exception:
+            pass
+    elif username_hint:
+        try:
+            entity = await user_client.get_entity(f"@{username_hint}")
+        except Exception:
+            pass
+
+    # 2. Try direct resolution by numeric ID or title
+    if not entity:
+        if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
+            lookup = int(target_str)
+        else:
+            lookup = target_str
+
+        try:
+            entity = await user_client.get_entity(lookup)
+        except Exception:
+            # 3. If direct resolution failed, populate dialogs cache on user_client and search
+            try:
+                dialogs = await user_client.get_dialogs(limit=250)
+                for d in dialogs:
+                    d_uname = getattr(d.entity, "username", "") or ""
+                    d_title = getattr(d.entity, "title", "") or d.name or ""
+                    d_id_str = str(d.id).replace("-100", "").replace("-", "")
+
+                    if (d_uname and d_uname.lower() == clean_target) or \
+                       (d_id_str == clean_id) or \
+                       (d_title.lower() == clean_target) or \
+                       (chat_hint and d.id == getattr(chat_hint, "id", None)):
+                        entity = d.entity
+                        break
+            except Exception as de:
+                print(f"[Dialog Search Notice] {de}")
+
+    # 4. If resolved with user_client
+    if entity:
         title = getattr(entity, "title", target_str)
         entity_id_str = str(entity.id)
         username = getattr(entity, "username", "")
         formatted_target = f"@{username}" if username else str(entity.id)
 
-        # Save to DB
         db.add_tracked_group(formatted_target, title=title, entity_id=entity_id_str, added_by=str(added_by))
-        
+
         info = {"target": formatted_target, "entity": entity, "title": title, "entity_id": entity_id_str}
         tracked_entities[entity_id_str] = info
         tracked_targets_map[formatted_target.lower()] = info
@@ -367,9 +405,27 @@ async def resolve_and_add_target(target_val, added_by="Owner"):
 
         print(f"[Tracked Group Added] ✅ '{title}' (ID: {entity_id_str}, Target: {formatted_target})")
         return True, f"✅ Successfully added group: **{title}** (`{formatted_target}`)"
-    except Exception as e:
-        print(f"[Tracked Group Error] Could not resolve '{target_str}': {e}")
-        return False, f"⚠️ Could not resolve target `{target_str}`: {e}\n_Ensure your user account is a member of the group._"
+
+    # 5. Fallback if user_client cannot resolve yet, but we have chat_hint from bot
+    if chat_hint:
+        title = getattr(chat_hint, "title", target_str)
+        username = getattr(chat_hint, "username", "")
+        entity_id_str = str(chat_hint.id)
+        formatted_target = f"@{username}" if username else entity_id_str
+
+        db.add_tracked_group(formatted_target, title=title, entity_id=entity_id_str, added_by=str(added_by))
+        
+        info = {"target": formatted_target, "entity": chat_hint, "title": title, "entity_id": entity_id_str}
+        tracked_entities[entity_id_str] = info
+        tracked_targets_map[formatted_target.lower()] = info
+        tracked_targets_map[entity_id_str] = info
+        if username:
+            tracked_targets_map[f"@{username.lower()}"] = info
+
+        print(f"[Tracked Group Added via Bot Hint] ✅ '{title}' (ID: {entity_id_str})")
+        return True, f"✅ Successfully registered group: **{title}** (`{formatted_target}`)\n\n_Note: Please ensure your user account is also a member of this group so it can listen to live voice calls._"
+
+    return False, f"⚠️ Could not resolve target `{target_str}`.\n_Ensure the user account is a member of the group or invite the bot to the group and use `/trackhere`._"
 
 async def untrack_target(target_val):
     """Removes a target group from tracking."""
@@ -810,8 +866,11 @@ async def bot_command_handler(event):
             await safe_reply(event, "⚠️ `/trackhere` can only be used inside a Telegram Group or Channel.\nTo add a group from DM, use `/addgroup @username`.", parse_mode="markdown")
             return
 
+        chat = await event.get_chat()
         chat_id = event.chat_id
-        success, reply_msg = await resolve_and_add_target(chat_id, added_by=str(event.sender_id or "Admin"))
+        username = getattr(chat, "username", "")
+        target_val = f"@{username}" if username else chat_id
+        success, reply_msg = await resolve_and_add_target(target_val, added_by=str(event.sender_id or "Admin"), chat_hint=chat)
         await safe_reply(event, reply_msg, parse_mode="markdown")
 
     elif cmd in ["/addgroup", "/trackgroup", "/setgroup"]:
@@ -1248,6 +1307,11 @@ async def main():
             first_name = getattr(user_me, "first_name", "") or getattr(user_me, "title", "User")
             uname = getattr(user_me, "username", "") or "NoUsername"
             print(f"[Stream Monitor] : Connected as {first_name} (@{uname})")
+            try:
+                print("[Stream Monitor] : Loading dialogs & caching group entities...")
+                await user_client.get_dialogs(limit=250)
+            except Exception as de:
+                print(f"[Dialogs Cache Notice] {de}")
             break
         except Exception as e:
             print(f"[User Client Connect Retry] {e}. Retrying in 5s...")
