@@ -511,9 +511,11 @@ def format_report_message(stream_meta, participants, is_active=False):
 
     return msg
 
-def get_all_admin_recipients():
-    """Returns a unified, deduplicated list of all admins from Config/ENV and Database."""
+def get_all_admin_recipients(full_info=False):
+    """Returns a unified, deduplicated list of all admins from Config/ENV, DM interactions, and Database."""
+    targets_seen = set()
     recipients = []
+
     # 1. From Config / ENV (comma-separated support)
     if ADMIN_CHAT_ID:
         for item in str(ADMIN_CHAT_ID).split(","):
@@ -521,19 +523,100 @@ def get_all_admin_recipients():
             if val:
                 if not val.startswith("@") and not val.isdigit() and not (val.startswith("-") and val[1:].isdigit()):
                     val = f"@{val}"
-                if val not in recipients:
-                    recipients.append(val)
+                key = val.lower()
+                if key not in targets_seen:
+                    targets_seen.add(key)
+                    recipients.append({"target": val, "name": "Config Admin", "source": "Config"})
 
-    # 2. From Database
-    for r in db.get_admin_recipients():
-        val = str(r).strip()
+    # 2. From Database (includes users who ever sent DM)
+    for row in db.get_admin_recipients():
+        if isinstance(row, dict):
+            val = str(row.get("target", "")).strip()
+            name = str(row.get("name", "")).strip()
+            source = str(row.get("added_by", "Database")).strip()
+        else:
+            val = str(row).strip()
+            name = ""
+            source = "Database"
+
         if val:
             if not val.startswith("@") and not val.isdigit() and not (val.startswith("-") and val[1:].isdigit()):
                 val = f"@{val}"
-            if val not in recipients:
-                recipients.append(val)
+            key = val.lower()
+            if key not in targets_seen:
+                targets_seen.add(key)
+                recipients.append({"target": val, "name": name, "source": source})
 
-    return recipients
+    if full_info:
+        return recipients
+    return [r["target"] for r in recipients]
+
+def format_admin_list_message():
+    all_admins = get_all_admin_recipients(full_info=True)
+    if not all_admins:
+        return "⚠️ No admin recipients configured yet. Send any message to this bot in private DM or use `/addadmin @username` to add one."
+
+    msg = f"👑 **All Configured Admin Recipients** ({len(all_admins)} receiving post-stream reports):\n\n"
+    for idx, a in enumerate(all_admins, 1):
+        target = a["target"]
+        name = a.get("name", "")
+        if name and name != "Config Admin":
+            name_str = f" **{name}** (`{target}`)"
+        else:
+            name_str = f" **{target}**"
+        msg += f"`#{idx:02d}` {name_str}\n"
+
+    msg += "\n_ℹ️ Any user who sends a DM to this bot is automatically enrolled to receive post-stream reports._\n"
+    msg += "_Use `/addadmin @username` or `/removeadmin @username` to manage._"
+    return msg
+
+def format_groups_list_message():
+    tracked_db = db.get_tracked_groups()
+    
+    # Merge with in-memory tracked_entities
+    groups_dict = {}
+    for g in tracked_db:
+        key = str(g.get("entity_id") or g.get("target")).strip()
+        if key:
+            groups_dict[key] = {
+                "title": g.get("title") or g.get("target"),
+                "target": g.get("target"),
+                "entity_id": str(g.get("entity_id", ""))
+            }
+            
+    for eid, info in tracked_entities.items():
+        if eid not in groups_dict and info.get("target") not in groups_dict:
+            groups_dict[eid] = {
+                "title": info.get("title", eid),
+                "target": info.get("target", eid),
+                "entity_id": str(eid)
+            }
+
+    if not groups_dict:
+        return "⚠️ No groups are currently being tracked.\nUse `/trackhere` in a group or `/addgroup @username` to add one."
+
+    msg = f"📋 **Tracked Groups & Live Status** ({len(groups_dict)}):\n\n"
+    for idx, (gid, g) in enumerate(groups_dict.items(), 1):
+        title = g.get("title") or g.get("target")
+        target = g.get("target")
+        eid = g.get("entity_id", "")
+        
+        # Check active status
+        active_tracker = tracker_manager.get_tracker_for_chat(eid) if eid else None
+        if not active_tracker and target:
+            active_tracker = tracker_manager.get_tracker_for_chat(target)
+            
+        if active_tracker:
+            stats = active_tracker.get_current_stats()
+            online_count = sum(1 for p in stats["participants"] if p["is_online"])
+            status_icon = f"🔴 **LIVE NOW** ({stats['total_min']:.1f}m | 👥 {online_count} online)"
+        else:
+            status_icon = "⚪️ Idle"
+
+        msg += f"`#{idx}` **{title}** (`{target}`)\n    └ Status: {status_icon}\n"
+
+    msg += "\n_Use `/trackhere` in any group or `/addgroup @group` to add more._"
+    return msg
 
 async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None, chat_title=""):
     """Sends the post-stream report and CSV directly to configured admin(s) and/or the specific group."""
@@ -718,38 +801,14 @@ async def bot_callback_handler(event):
             pass
 
     elif data == b"menu_groups":
-        tracked_db = db.get_tracked_groups()
-        if not tracked_db:
-            msg = "⚠️ No groups are currently being tracked.\nUse `/trackhere` in a group or `/addgroup @username` to add one."
-        else:
-            msg = f"📋 **Tracked Groups & Live Status** ({len(tracked_db)}):\n\n"
-            for idx, g in enumerate(tracked_db, 1):
-                title = g.get("title") or g.get("target")
-                target = g.get("target")
-                eid = g.get("entity_id", "")
-                active_tracker = tracker_manager.get_tracker_for_chat(eid)
-                if active_tracker:
-                    stats = active_tracker.get_current_stats()
-                    online_count = sum(1 for p in stats["participants"] if p["is_online"])
-                    status_icon = f"🔴 **LIVE NOW** ({stats['total_min']:.1f}m | 👥 {online_count} online)"
-                else:
-                    status_icon = "⚪️ Idle"
-                msg += f"`#{idx}` **{title}** (`{target}`)\n    └ Status: {status_icon}\n"
-            msg += "\n_Use `/trackhere` in any group or `/addgroup @group` to add more._"
+        msg = format_groups_list_message()
         try:
             await event.edit(msg, buttons=build_back_button(b"menu_groups"), parse_mode="markdown")
         except Exception:
             pass
 
     elif data == b"menu_admins":
-        all_admins = get_all_admin_recipients()
-        if all_admins:
-            msg = f"👑 **All Configured Admin Recipients** ({len(all_admins)} receiving post-stream reports):\n\n"
-            for idx, a in enumerate(all_admins, 1):
-                msg += f"`#{idx:02d}` **{a}**\n"
-            msg += "\n_Use `/addadmin @username` or `/removeadmin @username` to manage._\n_Note: Each admin must send `/start` to this bot once in private DM._"
-        else:
-            msg = "⚠️ No admin recipients configured yet. Use `/addadmin @username` to add one."
+        msg = format_admin_list_message()
         try:
             await event.edit(msg, buttons=build_back_button(b"menu_admins"), parse_mode="markdown")
         except Exception:
@@ -818,6 +877,20 @@ async def bot_callback_handler(event):
 # --- IN-TELEGRAM COMMAND HANDLERS ---
 @bot_client.on(events.NewMessage)
 async def bot_command_handler(event):
+    # Auto-enroll any DM user into admin recipients so all DM interactors receive reports
+    if event.is_private:
+        try:
+            sender = await event.get_sender()
+            if sender and not getattr(sender, "bot", False):
+                first = getattr(sender, "first_name", "") or ""
+                last = getattr(sender, "last_name", "") or ""
+                full_name = f"{first} {last}".strip() or f"User {event.sender_id}"
+                username = getattr(sender, "username", "")
+                target = f"@{username}" if username else str(event.chat_id)
+                db.add_admin_recipient(target, name=full_name, added_by="DM Interaction")
+        except Exception as ee:
+            print(f"[DM Auto-Enroll Notice] {ee}")
+
     text = event.raw_text.strip()
     if not text:
         return
@@ -836,30 +909,7 @@ async def bot_command_handler(event):
 
     # 1. GROUP MANAGEMENT COMMANDS
     if cmd in ["/groups", "/listgroups", "/trackedgroups"]:
-        tracked_db = db.get_tracked_groups()
-        if not tracked_db:
-            await safe_reply(event, "⚠️ No groups are currently being tracked.\nUse `/trackhere` in a group or `/addgroup @username` to add one.", parse_mode="markdown")
-            return
-
-        msg = f"📋 **Tracked Groups & Live Status** ({len(tracked_db)}):\n\n"
-        for idx, g in enumerate(tracked_db, 1):
-            title = g.get("title") or g.get("target")
-            target = g.get("target")
-            eid = g.get("entity_id", "")
-            
-            # Check if this group has an active stream
-            active_tracker = tracker_manager.get_tracker_for_chat(eid)
-            if active_tracker:
-                stats = active_tracker.get_current_stats()
-                online_count = sum(1 for p in stats["participants"] if p["is_online"])
-                status_icon = f"🔴 **LIVE NOW** ({stats['total_min']:.1f}m | 👥 {online_count} online)"
-            else:
-                status_icon = "⚪️ Idle"
-
-            msg += f"`#{idx}` **{title}** (`{target}`)\n    └ Status: {status_icon}\n"
-
-        msg += "\n_Use `/trackhere` in any group or `/addgroup @group` to add more._"
-        await safe_reply(event, msg, parse_mode="markdown")
+        await safe_reply(event, format_groups_list_message(), parse_mode="markdown")
 
     elif cmd in ["/trackhere", "/trackthis"]:
         if event.is_private:
@@ -869,7 +919,12 @@ async def bot_command_handler(event):
         chat = await event.get_chat()
         chat_id = event.chat_id
         username = getattr(chat, "username", "")
-        target_val = f"@{username}" if username else chat_id
+        title = getattr(chat, "title", "") or str(chat_id)
+        target_val = f"@{username}" if username else str(chat_id)
+        
+        # Save immediately to DB
+        db.add_tracked_group(target_val, title=title, entity_id=str(chat_id), added_by=str(event.sender_id or "Admin"))
+        
         success, reply_msg = await resolve_and_add_target(target_val, added_by=str(event.sender_id or "Admin"), chat_hint=chat)
         await safe_reply(event, reply_msg, parse_mode="markdown")
 
@@ -992,16 +1047,7 @@ async def bot_command_handler(event):
 
     # 5. ADMIN ROUTING COMMANDS
     elif cmd in ["/admins", "/adminlist"]:
-        all_admins = get_all_admin_recipients()
-        if all_admins:
-            msg = f"👑 **All Configured Admin Recipients** ({len(all_admins)} receiving post-stream reports):\n\n"
-            for idx, a in enumerate(all_admins, 1):
-                msg += f"`#{idx:02d}` **{a}**\n"
-            msg += "\n_Use `/addadmin @username` or `/removeadmin @username` to manage._"
-            msg += "\n_Note: Each admin must send `/start` to this bot once in private DM so Telegram allows delivering reports._"
-            await safe_reply(event, msg, parse_mode="markdown")
-        else:
-            await safe_reply(event, "⚠️ No admin recipients configured yet. Use `/addadmin @username` to add one.", parse_mode="markdown")
+        await safe_reply(event, format_admin_list_message(), parse_mode="markdown")
 
     elif cmd in ["/addadmin", "/setadmin"]:
         parts = text.split(maxsplit=1)
@@ -1018,13 +1064,9 @@ async def bot_command_handler(event):
                     if db.add_admin_recipient(t, added_by=str(event.sender_id or event.chat_id)):
                         added_list.append(t)
 
-            all_admins = get_all_admin_recipients()
             await safe_reply(
                 event,
-                f"✅ **Admin Recipient Added**: {', '.join(added_list)}\n\n"
-                f"📋 **Full Active Admin Recipients List** ({len(all_admins)}):\n" +
-                "\n".join([f"`#{idx:02d}` • `{a}`" for idx, a in enumerate(all_admins, 1)]) +
-                "\n\n_Note: Ensure added admins send `/start` to this bot in private chat so Telegram allows automated DMs._",
+                f"✅ **Admin Recipient Added**: {', '.join(added_list)}\n\n" + format_admin_list_message(),
                 parse_mode="markdown"
             )
 
@@ -1221,6 +1263,31 @@ async def register_bot_commands():
     except Exception:
         pass
 
+async def sync_bot_dialogs():
+    """Syncs existing DM conversations to admin_recipients and existing groups to tracked_groups."""
+    try:
+        print("[Bot Sync] Syncing existing bot DM dialogs into admin recipients...")
+        dialogs = await bot_client.get_dialogs(limit=250)
+        synced_count = 0
+        for d in dialogs:
+            entity = d.entity
+            if d.is_user and not getattr(entity, "bot", False):
+                first = getattr(entity, "first_name", "") or ""
+                last = getattr(entity, "last_name", "") or ""
+                full_name = f"{first} {last}".strip() or f"User {d.id}"
+                username = getattr(entity, "username", "")
+                target = f"@{username}" if username else str(d.id)
+                if db.add_admin_recipient(target, name=full_name, added_by="DM Interaction"):
+                    synced_count += 1
+            elif d.is_group or d.is_channel:
+                title = getattr(entity, "title", "") or f"Group {d.id}"
+                username = getattr(entity, "username", "")
+                target = f"@{username}" if username else str(d.id)
+                db.update_tracked_group_info(target, title, str(d.id))
+        print(f"[Bot Sync] Dialogs sync completed. Total admins now: {len(db.get_admin_recipients())}")
+    except Exception as e:
+        print(f"[Bot Dialogs Sync Notice] {e}")
+
 async def try_start_bot():
     global bot_active
     try:
@@ -1230,6 +1297,7 @@ async def try_start_bot():
         bot_active = True
         print(f"[UI Bot Online]  : @{bot_me.username} ({bot_me.first_name})")
         asyncio.create_task(register_bot_commands())
+        asyncio.create_task(sync_bot_dialogs())
     except errors.FloodWaitError as e:
         print(f"[Bot Cooldown]   : Telegram rate-limit for new bot login ({e.seconds}s). Running stream monitor in the meantime...")
         bot_active = False
@@ -1260,6 +1328,7 @@ async def bot_retry_after(seconds):
                 bot_me = await bot_client.get_me()
                 bot_active = True
                 print(f"\n[UI Bot Activated] : @{bot_me.username} is now online in Telegram!")
+                asyncio.create_task(sync_bot_dialogs())
                 break
             except errors.FloodWaitError as fe:
                 print(f"[Bot Cooldown Extended] Waiting {fe.seconds}s...")

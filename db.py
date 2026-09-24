@@ -176,21 +176,38 @@ def update_tracked_group_info(target, title, entity_id):
 def get_admin_recipients():
     with get_connection() as conn:
         c = conn.cursor()
-        c.execute("SELECT target FROM admin_recipients ORDER BY id ASC")
-        return [row["target"] for row in c.fetchall()]
+        try:
+            c.execute("SELECT target, name, added_by FROM admin_recipients ORDER BY id ASC")
+            return [dict(row) for row in c.fetchall()]
+        except Exception:
+            c.execute("SELECT target FROM admin_recipients ORDER BY id ASC")
+            return [{"target": row["target"], "name": "", "added_by": ""} for row in c.fetchall()]
 
-def add_admin_recipient(target, added_by="Owner"):
-    target = target.strip()
+def add_admin_recipient(target, name="", added_by="Owner"):
+    target = str(target).strip()
     if not target:
         return False
     with get_connection() as conn:
         c = conn.cursor()
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
         try:
-            c.execute("INSERT OR IGNORE INTO admin_recipients (target, added_by, added_at) VALUES (?, ?, ?)", (target, str(added_by), now_str))
-            return True
+            c.execute("ALTER TABLE admin_recipients ADD COLUMN name TEXT DEFAULT ''")
         except Exception:
-            return False
+            pass
+        try:
+            c.execute("""
+            INSERT INTO admin_recipients (target, name, added_by, added_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(target) DO UPDATE SET 
+                name = CASE WHEN excluded.name != '' THEN excluded.name ELSE admin_recipients.name END
+            """, (target, str(name), str(added_by), now_str))
+            return True
+        except Exception as e:
+            try:
+                c.execute("INSERT OR IGNORE INTO admin_recipients (target, added_by, added_at) VALUES (?, ?, ?)", (target, str(added_by), now_str))
+                return True
+            except Exception:
+                return False
 
 def remove_admin_recipient(target):
     target = target.strip()
