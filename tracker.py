@@ -5,7 +5,7 @@ import asyncio
 import datetime
 import warnings
 from tabulate import tabulate
-from telethon import TelegramClient, events, errors
+from telethon import TelegramClient, events, errors, Button
 from telethon.tl import types, functions
 from telethon.sessions import StringSession, MemorySession
 import base64
@@ -583,8 +583,181 @@ def get_help_menu():
         "• `/addadmin @username` — Add an admin to receive reports in DM\n"
         "• `/removeadmin @username` — Remove an admin from report delivery\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "_Tip: Tap any command above or use the [/] menu button to run instantly._"
+        "_Tip: Tap any button below to navigate instantly._"
     )
+
+def build_main_menu_buttons():
+    return [
+        [Button.inline("📊 Live Stats / Leaderboard", b"menu_stats"), Button.inline("🔴 Live Status", b"menu_status")],
+        [Button.inline("📄 Download CSV Report", b"menu_export"), Button.inline("👥 Tracked Groups", b"menu_groups")],
+        [Button.inline("👑 Admin Recipients", b"menu_admins"), Button.inline("ℹ️ Help & Commands", b"menu_help")]
+    ]
+
+def build_back_button(refresh_key=None):
+    row = []
+    if refresh_key:
+        row.append(Button.inline("🔄 Refresh", refresh_key))
+    row.append(Button.inline("« Back to Menu", b"menu_main"))
+    return [row]
+
+# --- INLINE KEYBOARD BUTTON CALLBACK HANDLER ---
+@bot_client.on(events.CallbackQuery)
+async def bot_callback_handler(event):
+    data = event.data
+    try:
+        await event.answer()
+    except Exception:
+        pass
+
+    if data == b"menu_main":
+        try:
+            await event.edit(get_help_menu(), buttons=build_main_menu_buttons(), parse_mode="markdown")
+        except Exception:
+            pass
+
+    elif data == b"menu_stats":
+        chat_id_str = str(event.chat_id)
+        active_tracker = tracker_manager.get_tracker_for_chat(chat_id_str)
+        if active_tracker:
+            stats = active_tracker.get_current_stats()
+            msg = format_report_message(stats, stats["participants"], is_active=True)
+        else:
+            active_all = tracker_manager.get_all_active()
+            if event.is_private and active_all:
+                msg = ""
+                for act in active_all:
+                    stats = act.get_current_stats()
+                    msg += format_report_message(stats, stats["participants"], is_active=True) + "\n\n"
+            else:
+                target_filter = None if event.is_private else chat_id_str
+                stream_meta, participants = db.get_latest_stream(chat_id=target_filter)
+                if stream_meta and participants:
+                    msg = format_report_message(stream_meta, participants, is_active=False)
+                else:
+                    msg = "⚠️ No live stream records found in database yet."
+        try:
+            await event.edit(msg, buttons=build_back_button(b"menu_stats"), parse_mode="markdown")
+        except Exception:
+            pass
+
+    elif data == b"menu_status":
+        tracked_db = db.get_tracked_groups()
+        active_all = tracker_manager.get_all_active()
+        if active_all:
+            msg = f"🔴 **{len(active_all)} Live Stream(s) Currently ACTIVE**\n\n"
+            for act in active_all:
+                stats = act.get_current_stats()
+                online_count = sum(1 for p in stats["participants"] if p["is_online"])
+                msg += f"📍 **{act.chat_title}**\n"
+                msg += f"   ⏱ Elapsed: `{stats['total_min']:.1f} mins`\n"
+                msg += f"   👥 Online now: `{online_count}` callers (Total: `{len(stats['participants'])}`)\n\n"
+        else:
+            group_count = len(tracked_db)
+            prev_stream, participants = db.get_latest_stream()
+            prev_info = f"\n_Last stream ({prev_stream.get('chat_title', '')}) had {len(participants)} callers._" if prev_stream and participants else ""
+            msg = f"⚪️ **No live streams are currently active** across {group_count} tracked group(s).{prev_info}"
+        try:
+            await event.edit(msg, buttons=build_back_button(b"menu_status"), parse_mode="markdown")
+        except Exception:
+            pass
+
+    elif data == b"menu_groups":
+        tracked_db = db.get_tracked_groups()
+        if not tracked_db:
+            msg = "⚠️ No groups are currently being tracked.\nUse `/trackhere` in a group or `/addgroup @username` to add one."
+        else:
+            msg = f"📋 **Tracked Groups & Live Status** ({len(tracked_db)}):\n\n"
+            for idx, g in enumerate(tracked_db, 1):
+                title = g.get("title") or g.get("target")
+                target = g.get("target")
+                eid = g.get("entity_id", "")
+                active_tracker = tracker_manager.get_tracker_for_chat(eid)
+                if active_tracker:
+                    stats = active_tracker.get_current_stats()
+                    online_count = sum(1 for p in stats["participants"] if p["is_online"])
+                    status_icon = f"🔴 **LIVE NOW** ({stats['total_min']:.1f}m | 👥 {online_count} online)"
+                else:
+                    status_icon = "⚪️ Idle"
+                msg += f"`#{idx}` **{title}** (`{target}`)\n    └ Status: {status_icon}\n"
+            msg += "\n_Use `/trackhere` in any group or `/addgroup @group` to add more._"
+        try:
+            await event.edit(msg, buttons=build_back_button(b"menu_groups"), parse_mode="markdown")
+        except Exception:
+            pass
+
+    elif data == b"menu_admins":
+        all_admins = get_all_admin_recipients()
+        if all_admins:
+            msg = f"👑 **All Configured Admin Recipients** ({len(all_admins)} receiving post-stream reports):\n\n"
+            for idx, a in enumerate(all_admins, 1):
+                msg += f"`#{idx:02d}` **{a}**\n"
+            msg += "\n_Use `/addadmin @username` or `/removeadmin @username` to manage._\n_Note: Each admin must send `/start` to this bot once in private DM._"
+        else:
+            msg = "⚠️ No admin recipients configured yet. Use `/addadmin @username` to add one."
+        try:
+            await event.edit(msg, buttons=build_back_button(b"menu_admins"), parse_mode="markdown")
+        except Exception:
+            pass
+
+    elif data == b"menu_export":
+        chat_id_str = str(event.chat_id)
+        active_tracker = tracker_manager.get_tracker_for_chat(chat_id_str)
+        csv_file_to_send = None
+        caption_text = ""
+
+        if active_tracker:
+            csv_file_to_send = active_tracker.generate_csv()
+            caption_text = f"📄 In-progress participation CSV export for **{active_tracker.chat_title}**."
+        else:
+            target_filter = None if event.is_private else chat_id_str
+            stream_meta, participants = db.get_latest_stream(chat_id=target_filter)
+            if stream_meta and stream_meta.get("csv_path") and os.path.exists(stream_meta["csv_path"]):
+                csv_file_to_send = stream_meta["csv_path"]
+                caption_text = f"📄 Latest completed stream CSV report for **{stream_meta.get('chat_title', 'Stream')}**."
+            elif participants:
+                filename = f"report_latest.csv"
+                filepath = os.path.join(CSV_OUTPUT_DIR, filename)
+                with open(filepath, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Rank", "User ID", "Name", "Username", "First Join (UTC)", "Last Leave (UTC)", "Session Count", "Total Duration (Minutes)", "Participation (%)"])
+                    for rank, p in enumerate(participants, 1):
+                        writer.writerow([rank, p["user_id"], p["name"], p["username"], p["first_join"], p["last_leave"], p["session_count"], f"{p['total_min']:.2f}", f"{p['pct']:.2f}"])
+                csv_file_to_send = filepath
+                caption_text = "📄 Latest stream CSV report."
+
+        if csv_file_to_send and os.path.exists(csv_file_to_send):
+            try:
+                await event.respond(caption_text, file=csv_file_to_send, parse_mode="markdown")
+                await event.edit("✅ CSV attendance spreadsheet dispatched above!", buttons=build_back_button(), parse_mode="markdown")
+            except Exception as se:
+                print(f"[Export Error] {se}")
+        else:
+            try:
+                await event.edit("⚠️ No stream reports found in history to export.", buttons=build_back_button(), parse_mode="markdown")
+            except Exception:
+                pass
+
+    elif data == b"menu_help":
+        help_detail = (
+            "📖 **Full Command Guide**\n\n"
+            "**📊 Stream Reports:**\n"
+            "• `/stats` or `/report` — View participant leaderboard\n"
+            "• `/livestatus` — Check real-time voice call status\n"
+            "• `/export` or `/csv` — Download spreadsheet\n\n"
+            "**👥 Group Management:**\n"
+            "• `/groups` — View all monitored groups\n"
+            "• `/trackhere` — Track current group\n"
+            "• `/addgroup @group` — Add group by username/ID\n"
+            "• `/removegroup @group` — Untrack group\n\n"
+            "**👑 Admin Recipients:**\n"
+            "• `/admins` — View recipient list\n"
+            "• `/addadmin @user` — Add report recipient\n"
+            "• `/removeadmin @user` — Remove report recipient"
+        )
+        try:
+            await event.edit(help_detail, buttons=build_back_button(), parse_mode="markdown")
+        except Exception:
+            pass
 
 # --- IN-TELEGRAM COMMAND HANDLERS ---
 @bot_client.on(events.NewMessage)
@@ -595,7 +768,7 @@ async def bot_command_handler(event):
 
     # If it's a private chat (DM) and user sends any text without a slash, reply with the menu
     if event.is_private and not (text.startswith("/") or text.startswith(".")):
-        await safe_reply(event, get_help_menu(), parse_mode="markdown")
+        await safe_reply(event, get_help_menu(), buttons=build_main_menu_buttons(), parse_mode="markdown")
         return
 
     if not (text.startswith("/") or text.startswith(".")):
@@ -820,7 +993,7 @@ async def bot_command_handler(event):
 
     # 6. HELP, START & MENU COMMANDS
     elif cmd in ["/menu", "/help", "/start", "/commands", "/options"]:
-        await safe_reply(event, get_help_menu(), parse_mode="markdown")
+        await safe_reply(event, get_help_menu(), buttons=build_main_menu_buttons(), parse_mode="markdown")
 
 # --- USER CLIENT LIVE CALL POLLING & EVENTS ---
 @user_client.on(events.Raw)
