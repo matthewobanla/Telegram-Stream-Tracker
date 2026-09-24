@@ -455,6 +455,30 @@ def format_report_message(stream_meta, participants, is_active=False):
 
     return msg
 
+def get_all_admin_recipients():
+    """Returns a unified, deduplicated list of all admins from Config/ENV and Database."""
+    recipients = []
+    # 1. From Config / ENV (comma-separated support)
+    if ADMIN_CHAT_ID:
+        for item in str(ADMIN_CHAT_ID).split(","):
+            val = item.strip()
+            if val:
+                if not val.startswith("@") and not val.isdigit() and not (val.startswith("-") and val[1:].isdigit()):
+                    val = f"@{val}"
+                if val not in recipients:
+                    recipients.append(val)
+
+    # 2. From Database
+    for r in db.get_admin_recipients():
+        val = str(r).strip()
+        if val:
+            if not val.startswith("@") and not val.isdigit() and not (val.startswith("-") and val[1:].isdigit()):
+                val = f"@{val}"
+            if val not in recipients:
+                recipients.append(val)
+
+    return recipients
+
 async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None, chat_title=""):
     """Sends the post-stream report and CSV directly to configured admin(s) and/or the specific group."""
     if not AUTO_POST_REPORT:
@@ -476,18 +500,8 @@ async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None,
 
         report_text = format_report_message(stream_meta, participants, is_active=False)
 
-        # Collect targets
-        recipients = []
-        db_recipients = db.get_admin_recipients()
-        for r in db_recipients:
-            if r not in recipients:
-                recipients.append(r)
-
-        if not recipients and ADMIN_CHAT_ID:
-            for item in str(ADMIN_CHAT_ID).split(","):
-                val = item.strip()
-                if val and val not in recipients:
-                    recipients.append(val)
+        # Collect all admin recipients
+        recipients = get_all_admin_recipients()
 
         # If posting to group is enabled, include the specific group entity/target
         if AUTO_POST_TO_GROUP and group_entity is not None:
@@ -503,7 +517,7 @@ async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None,
             except Exception as ge:
                 print(f"[Auto-Report Notice] Could not post to group {chat_title}: {ge}")
 
-        # Send to admin DMs
+        # Send to all admin DMs
         for target in recipients:
             try:
                 target_val = int(target) if (isinstance(target, str) and (target.isdigit() or (target.startswith("-") and target[1:].isdigit()))) else target
@@ -741,18 +755,16 @@ async def bot_command_handler(event):
 
     # 5. ADMIN ROUTING COMMANDS
     elif cmd in ["/admins", "/adminlist"]:
-        db_admins = db.get_admin_recipients()
-        if not db_admins and ADMIN_CHAT_ID:
-            db_admins = [x.strip() for x in str(ADMIN_CHAT_ID).split(",") if x.strip()]
-
-        if db_admins:
-            msg = "👑 **Configured Admin Recipients** (Receiving Post-Stream Reports):\n\n"
-            for idx, a in enumerate(db_admins, 1):
-                msg += f"`#{idx}` {a}\n"
+        all_admins = get_all_admin_recipients()
+        if all_admins:
+            msg = f"👑 **All Configured Admin Recipients** ({len(all_admins)} receiving post-stream reports):\n\n"
+            for idx, a in enumerate(all_admins, 1):
+                msg += f"`#{idx:02d}` **{a}**\n"
             msg += "\n_Use `/addadmin @username` or `/removeadmin @username` to manage._"
+            msg += "\n_Note: Each admin must send `/start` to this bot once in private DM so Telegram allows delivering reports._"
             await safe_reply(event, msg, parse_mode="markdown")
         else:
-            await safe_reply(event, "⚠️ No specific admin recipients configured. Set via `/addadmin @username`.", parse_mode="markdown")
+            await safe_reply(event, "⚠️ No admin recipients configured yet. Use `/addadmin @username` to add one.", parse_mode="markdown")
 
     elif cmd in ["/addadmin", "/setadmin"]:
         parts = text.split(maxsplit=1)
@@ -766,16 +778,16 @@ async def bot_command_handler(event):
                 if t:
                     if not t.startswith("@") and not t.isdigit() and not (t.startswith("-") and t[1:].isdigit()):
                         t = f"@{t}"
-                    if db.add_admin_recipient(t, added_by=str(event.chat_id)):
+                    if db.add_admin_recipient(t, added_by=str(event.sender_id or event.chat_id)):
                         added_list.append(t)
 
-            all_admins = db.get_admin_recipients()
+            all_admins = get_all_admin_recipients()
             await safe_reply(
                 event,
                 f"✅ **Admin Recipient Added**: {', '.join(added_list)}\n\n"
-                f"📋 **Current Report Recipients** ({len(all_admins)}):\n" +
-                "\n".join([f"• `{a}`" for a in all_admins]) +
-                "\n\n_Note: Ensure the added admin sends `/start` to @KHkronosbot so Telegram allows private DMs._",
+                f"📋 **Full Active Admin Recipients List** ({len(all_admins)}):\n" +
+                "\n".join([f"`#{idx:02d}` • `{a}`" for idx, a in enumerate(all_admins, 1)]) +
+                "\n\n_Note: Ensure added admins send `/start` to this bot in private chat so Telegram allows automated DMs._",
                 parse_mode="markdown"
             )
 
@@ -789,17 +801,17 @@ async def bot_command_handler(event):
             if not removed and not target_to_remove.startswith("@"):
                 removed = db.remove_admin_recipient(f"@{target_to_remove}")
 
-            all_admins = db.get_admin_recipients()
+            all_admins = get_all_admin_recipients()
             if removed:
                 await safe_reply(
                     event,
                     f"🗑 **Removed**: `{target_to_remove}`\n\n"
-                    f"📋 **Remaining Report Recipients** ({len(all_admins)}):\n" +
-                    ("\n".join([f"• `{a}`" for a in all_admins]) if all_admins else "_None (will use default config)_"),
+                    f"📋 **Remaining Admin Recipients** ({len(all_admins)}):\n" +
+                    ("\n".join([f"`#{idx:02d}` • `{a}`" for idx, a in enumerate(all_admins, 1)]) if all_admins else "_None_"),
                     parse_mode="markdown"
                 )
             else:
-                await safe_reply(event, f"⚠️ `{target_to_remove}` was not found in the admin list.\nType `/admins` to view the list.", parse_mode="markdown")
+                await safe_reply(event, f"⚠️ `{target_to_remove}` was not found in database admin list.\nType `/admins` to view the list.", parse_mode="markdown")
 
     # 6. HELP & START COMMAND
     elif cmd in ["/help", "/start"]:
@@ -1065,6 +1077,11 @@ async def main():
     for t in config_targets:
         db.add_tracked_group(t, added_by="Config")
 
+    # Load and seed admin recipients from Config / ENV
+    config_admins = [a.strip() for a in str(ADMIN_CHAT_ID).split(",") if a.strip()]
+    for a in config_admins:
+        db.add_admin_recipient(a, added_by="Config")
+
     # Load all tracked groups from Database
     db_groups = db.get_tracked_groups()
     print(f"\nResolving {len(db_groups)} tracked target group(s)...")
@@ -1073,9 +1090,11 @@ async def main():
         if target:
             await resolve_and_add_target(target, added_by=g.get("added_by", "Database"))
 
+    all_admins = get_all_admin_recipients()
     print(f"\n[READY] Participant tracking active for {len(tracked_entities)} group(s)!")
     for eid, info in tracked_entities.items():
-        print(f"  • {info['title']} ({info['target']})")
+        print(f"  • Group: {info['title']} ({info['target']})")
+    print(f"  • Active Admin Recipients ({len(all_admins)}): {', '.join(all_admins) if all_admins else 'None'}")
     print("  Auto-generates attendance CSV reports on stream end.")
     print("  Permanently persists all sessions to SQLite database.\n")
 
