@@ -159,14 +159,21 @@ The tracker will now run continuously in the background, automatically detecting
 
 ## 💬 In-Telegram Bot Commands
 
-Members and admins in the target group (or in private chat with the bot) can use the following commands:
+Members and admins can use the following commands in any group or in private DM with the bot:
 
 | Command | Description |
 | :--- | :--- |
-| `/stats` or `/report` | Displays the top 20 participant leaderboard and duration statistics for the active stream or last completed stream. |
-| `/livestatus` | Checks if a live stream is currently active, showing total elapsed time and current online count. |
-| `/export` or `/csv` | Generates and sends the complete `.csv` participation spreadsheet directly in the chat. |
-| `/help` | Displays the available commands and help menu. |
+| **`/trackhere`** | *(In Group)* Immediately starts tracking attendance for the current group. |
+| **`/addgroup @group`** | Adds a target group/channel by username or Chat ID to active tracking. |
+| **`/removegroup @group`** | Removes a group from tracking. |
+| **`/groups`** | Lists all currently tracked groups and their real-time live stream statuses. |
+| **`/stats`** or **`/report`** | Displays the top 20 participant leaderboard and duration statistics for the active stream or last completed stream. |
+| **`/livestatus`** | Checks if a live stream is currently active across all tracked groups with elapsed time and online count. |
+| **`/export`** or **`/csv`** | Generates and sends the complete `.csv` participation spreadsheet directly in the chat. |
+| **`/admins`** | Lists all configured admins receiving auto-reports. |
+| **`/addadmin @user`** | Adds an admin to receive post-stream reports & CSVs in private DM. |
+| **`/removeadmin @user`** | Removes an admin from report delivery. |
+| **`/help`** | Displays the available commands and help menu. |
 
 ---
 

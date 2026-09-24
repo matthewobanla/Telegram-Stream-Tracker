@@ -113,9 +113,65 @@ def init_db():
         )
         """)
 
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS tracked_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target TEXT UNIQUE,
+            title TEXT,
+            entity_id TEXT,
+            added_by TEXT,
+            added_at TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+        """)
+
+        try:
+            c.execute("ALTER TABLE streams ADD COLUMN chat_id TEXT")
+        except Exception:
+            pass
+
         c.execute("SELECT COUNT(*) FROM streams")
         if c.fetchone()[0] == 0:
             seed_initial_stream(c)
+
+def get_tracked_groups():
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM tracked_groups WHERE is_active = 1 ORDER BY id ASC")
+        return [dict(row) for row in c.fetchall()]
+
+def add_tracked_group(target, title="", entity_id="", added_by="Owner"):
+    target = str(target).strip()
+    if not target:
+        return False
+    with get_connection() as conn:
+        c = conn.cursor()
+        now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        try:
+            c.execute("""
+            INSERT INTO tracked_groups (target, title, entity_id, added_by, added_at, is_active)
+            VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(target) DO UPDATE SET 
+                title = CASE WHEN excluded.title != '' THEN excluded.title ELSE tracked_groups.title END,
+                entity_id = CASE WHEN excluded.entity_id != '' THEN excluded.entity_id ELSE tracked_groups.entity_id END,
+                is_active = 1
+            """, (target, title, str(entity_id) if entity_id else "", str(added_by), now_str))
+            return True
+        except Exception as e:
+            print(f"[DB Add Group Error] {e}")
+            return False
+
+def remove_tracked_group(target):
+    target = str(target).strip()
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM tracked_groups WHERE LOWER(target) = LOWER(?) OR target = ? OR entity_id = ?", (target, target, str(target)))
+        return c.rowcount > 0
+
+def update_tracked_group_info(target, title, entity_id):
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE tracked_groups SET title = ?, entity_id = ? WHERE target = ? OR entity_id = ?", (title, str(entity_id), str(target), str(entity_id)))
 
 def get_admin_recipients():
     with get_connection() as conn:
@@ -143,14 +199,14 @@ def remove_admin_recipient(target):
         c.execute("DELETE FROM admin_recipients WHERE LOWER(target) = LOWER(?) OR target = ?", (target, target))
         return c.rowcount > 0
 
-def save_stream_start(stream_id, call_id, chat_title, start_time_dt):
+def save_stream_start(stream_id, call_id, chat_title, start_time_dt, chat_id=""):
     with get_connection() as conn:
         c = conn.cursor()
-        c.execute("UPDATE streams SET is_active = 0 WHERE is_active = 1")
+        c.execute("UPDATE streams SET is_active = 0 WHERE call_id = ? OR (chat_id != '' AND chat_id = ?)", (str(call_id), str(chat_id)))
         c.execute("""
-        INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, start_time, is_active)
-        VALUES (?, ?, ?, ?, 1)
-        """, (stream_id, str(call_id), chat_title, start_time_dt.isoformat()))
+        INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, chat_id, start_time, is_active)
+        VALUES (?, ?, ?, ?, ?, 1)
+        """, (stream_id, str(call_id), chat_title, str(chat_id) if chat_id else "", start_time_dt.isoformat()))
 
 def save_participant_join(stream_id, user_id, name, username, join_time_dt):
     with get_connection() as conn:
@@ -254,11 +310,29 @@ def save_stream_end(stream_id, end_time_dt, csv_path=""):
         WHERE stream_id = ?
         """, (end_str, total_stream_sec, total_count, csv_path, stream_id))
 
-def get_latest_stream():
+def get_latest_stream(chat_id=None):
     with get_connection() as conn:
         c = conn.cursor()
-        c.execute("SELECT * FROM streams ORDER BY rowid DESC LIMIT 1")
-        stream = c.fetchone()
+        if chat_id is not None and str(chat_id).strip():
+            cid_str = str(chat_id).strip()
+            # Try to match numeric ID (accounting for potential -100 prefix differences), username, or title
+            clean_id = cid_str.replace("-100", "").replace("-", "")
+            c.execute("""
+            SELECT * FROM streams 
+            WHERE chat_id = ? 
+               OR chat_id = ? 
+               OR chat_id LIKE ? 
+               OR chat_title LIKE ? 
+            ORDER BY rowid DESC LIMIT 1
+            """, (cid_str, f"-100{clean_id}", f"%{clean_id}%", f"%{cid_str}%"))
+            stream = c.fetchone()
+        else:
+            stream = None
+
+        if not stream:
+            c.execute("SELECT * FROM streams ORDER BY rowid DESC LIMIT 1")
+            stream = c.fetchone()
+
         if not stream:
             return None, []
 
@@ -270,9 +344,18 @@ def get_latest_stream():
         participants = c.fetchall()
         return dict(stream), [dict(p) for p in participants]
 
-def get_stream_history(limit=5):
+def get_stream_history(limit=5, chat_id=None):
     with get_connection() as conn:
         c = conn.cursor()
-        c.execute("SELECT * FROM streams WHERE is_active = 0 ORDER BY rowid DESC LIMIT ?", (limit,))
+        if chat_id is not None and str(chat_id).strip():
+            cid_str = str(chat_id).strip()
+            clean_id = cid_str.replace("-100", "").replace("-", "")
+            c.execute("""
+            SELECT * FROM streams 
+            WHERE is_active = 0 AND (chat_id = ? OR chat_id LIKE ? OR chat_title LIKE ?)
+            ORDER BY rowid DESC LIMIT ?
+            """, (cid_str, f"%{clean_id}%", f"%{cid_str}%", limit))
+        else:
+            c.execute("SELECT * FROM streams WHERE is_active = 0 ORDER BY rowid DESC LIMIT ?", (limit,))
         rows = c.fetchall()
         return [dict(r) for r in rows]
