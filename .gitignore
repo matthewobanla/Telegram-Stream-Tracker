@@ -23,6 +23,8 @@ session_string.txt
 # Reports & exports
 reports/*.csv
 !reports/.gitkeep
+recordings/
+transcripts/
 
 # SQLite database
 *.db

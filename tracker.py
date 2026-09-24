@@ -11,6 +11,8 @@ from telethon.sessions import StringSession, MemorySession
 import base64
 import config
 import db
+import transcriber
+import audio_recorder
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 if hasattr(sys.stdout, "reconfigure"):
@@ -308,6 +310,9 @@ class MultiCallManager:
         tracker = CallSessionTracker(call_input, chat_title, chat_id)
         self.active_trackers[call_id] = tracker
         self.chat_to_call[str(chat_id)] = call_id
+
+        # Start live audio recording for this voice stream
+        asyncio.create_task(audio_recorder.recorder_instance.start_recording(chat_id, call_id, chat_title))
         return tracker
 
     def end_call_by_id(self, call_id):
@@ -618,8 +623,8 @@ def format_groups_list_message():
     msg += "\n_Use `/trackhere` in any group or `/addgroup @group` to add more._"
     return msg
 
-async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None, chat_title=""):
-    """Sends the post-stream report and CSV directly to configured admin(s) and/or the specific group."""
+async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None, chat_title="", audio_path=None):
+    """Sends the post-stream report, CSV, and AI Speech-to-Text Summary directly to configured admin(s) and/or group."""
     if not AUTO_POST_REPORT:
         return
 
@@ -639,37 +644,66 @@ async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None,
 
         report_text = format_report_message(stream_meta, participants, is_active=False)
 
+        # Process Audio Recording via Gemini / Whisper if audio file was captured
+        ai_result = None
+        if audio_path and os.path.exists(audio_path) and os.path.getsize(audio_path) > 1024:
+            try:
+                print(f"[AI Transcription] 🎙 Processing call audio for [{chat_title}] via {transcriber.get_active_engine().upper()}...")
+                ai_result = await transcriber.process_audio_file(audio_path, chat_title=chat_title, stream_id=expected_stream_id)
+                print(f"[AI Transcription] ✅ Generated executive summary & transcript ({ai_result['engine']})")
+            except Exception as ae:
+                print(f"[AI Transcription Notice] {ae}")
+
         # Collect all admin recipients
         recipients = get_all_admin_recipients()
 
-        # If posting to group is enabled, include the specific group entity/target
-        if AUTO_POST_TO_GROUP and group_entity is not None:
+        # Helper function to send artifacts to a target entity
+        async def _dispatch_to_entity(entity, entity_name="", include_audio=False):
             try:
-                await bot_client.send_message(group_entity, report_text, parse_mode="markdown")
+                # 1. Send Attendance Leaderboard
+                await bot_client.send_message(entity, report_text, parse_mode="markdown")
+
+                # 2. Send CSV Spreadsheet
                 if csv_path and os.path.exists(csv_path):
                     await bot_client.send_file(
-                        group_entity,
+                        entity,
                         csv_path,
                         caption=f"📊 **Final Participation Spreadsheet ({chat_title})**\nDuration: {stream_meta.get('duration_sec', 0)/60.0:.1f} mins | Total: {len(participants)} callers"
                     )
-                print(f"[Auto-Report] Successfully posted report into group: {chat_title}")
-            except Exception as ge:
-                print(f"[Auto-Report Notice] Could not post to group {chat_title}: {ge}")
 
-        # Send to all admin DMs
+                # 3. Send AI Executive Summary Report & Transcript Document
+                if ai_result:
+                    summary_msg = f"📝 **AI Call Executive Summary & Minutes**\n*Engine: {ai_result['engine']}*\n\n{ai_result['summary']}"
+                    await bot_client.send_message(entity, summary_msg, parse_mode="markdown")
+
+                    if os.path.exists(ai_result["transcript_path"]):
+                        await bot_client.send_file(
+                            entity,
+                            ai_result["transcript_path"],
+                            caption=f"📜 **Full Verbatim Transcript ({chat_title})**"
+                        )
+
+                # 4. Send Audio Recording ONLY to Admin Recipients (never to group)
+                if include_audio and audio_path and os.path.exists(audio_path) and os.path.getsize(audio_path) <= 45 * 1024 * 1024:
+                    await bot_client.send_file(
+                        entity,
+                        audio_path,
+                        caption=f"🎙 **Voice Stream Audio Recording ({chat_title})**"
+                    )
+                print(f"[Auto-Report] Successfully dispatched report package to: {entity_name or chat_title}")
+            except Exception as de:
+                print(f"[Auto-Report Notice] Dispatch error for {entity_name}: {de}")
+
+        # If posting to group is enabled, include the specific group entity (audio excluded)
+        if AUTO_POST_TO_GROUP and group_entity is not None:
+            await _dispatch_to_entity(group_entity, entity_name=chat_title, include_audio=False)
+
+        # Send to all admin DMs (includes audio recording)
         for target in recipients:
             try:
                 target_val = int(target) if (isinstance(target, str) and (target.isdigit() or (target.startswith("-") and target[1:].isdigit()))) else target
                 bot_target = await bot_client.get_entity(target_val)
-                await bot_client.send_message(bot_target, report_text, parse_mode="markdown")
-
-                if csv_path and os.path.exists(csv_path):
-                    await bot_client.send_file(
-                        bot_target,
-                        csv_path,
-                        caption=f"📊 **Final Participation Spreadsheet ({chat_title})**\nDuration: {stream_meta.get('duration_sec', 0)/60.0:.1f} mins | Total: {len(participants)} callers"
-                    )
-                print(f"[Auto-Report] Successfully sent report and CSV to admin: {target}")
+                await _dispatch_to_entity(bot_target, entity_name=target, include_audio=True)
             except Exception as e:
                 print(f"[Auto-Report Notice] Could not send to admin {target}: {e}")
                 print(f"                     (Ensure admin sent /start to the bot once in private DM)")
@@ -704,14 +738,20 @@ async def safe_reply(event, text, file=None, **kwargs):
             break
 
 def get_help_menu():
+    curr_eng = transcriber.get_active_engine().upper()
     return (
-        "🤖 **Telegram Live Stream Tracker (Kronos Bot)**\n"
+        "🤖 **Telegram Live Stream Tracker & AI Scribe (Kronos Bot)**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "**📊 Attendance & Reports**\n"
         "• `/menu` or `/help` — Display this command menu\n"
         "• `/stats` or `/report` — View participant leaderboard & attendance %\n"
         "• `/livestatus` — Check live voice chat status across all tracked groups\n"
         "• `/export` or `/csv` — Download the attendance CSV spreadsheet\n\n"
+        "**🎙 AI Speech-to-Text & Minutes**\n"
+        f"• Active Engine: **{curr_eng}** (Gemini / Groq / OpenAI / Whisper)\n"
+        "• `/engine` — View or switch AI transcription engine\n"
+        "• `/transcribe` — Upload or forward any audio/voice note to get instant summary & transcript\n"
+        "• *(Auto)* — Post-stream minutes & transcript are automatically delivered when calls end\n\n"
         "**👥 Group Tracking Management**\n"
         "• `/groups` — List all monitored groups & live stream state\n"
         "• `/trackhere` — *(In Group)* Start tracking current group immediately\n"
@@ -729,7 +769,8 @@ def build_main_menu_buttons():
     return [
         [Button.inline("📊 Live Stats / Leaderboard", b"menu_stats"), Button.inline("🔴 Live Status", b"menu_status")],
         [Button.inline("📄 Download CSV Report", b"menu_export"), Button.inline("👥 Tracked Groups", b"menu_groups")],
-        [Button.inline("👑 Admin Recipients", b"menu_admins"), Button.inline("ℹ️ Help & Commands", b"menu_help")]
+        [Button.inline("🎙 AI Scribe & Engine", b"menu_engine"), Button.inline("👑 Admin Recipients", b"menu_admins")],
+        [Button.inline("ℹ️ Help & Commands", b"menu_help")]
     ]
 
 def build_back_button(refresh_key=None):
@@ -865,6 +906,27 @@ async def bot_callback_handler(event):
         except Exception:
             pass
 
+    elif data == b"menu_engine":
+        curr = transcriber.get_active_engine().upper()
+        gemini_set = "✅ Set" if os.getenv("GEMINI_API_KEY") else "❌ Not Set"
+        groq_set = "✅ Set" if os.getenv("GROQ_API_KEY") else "❌ Not Set"
+        openai_set = "✅ Set" if os.getenv("OPENAI_API_KEY") else "❌ Not Set"
+        engine_msg = (
+            f"🎙 **AI Voice Scribe & Transcription Engine**\n\n"
+            f"• Current Active Engine: **{curr}**\n\n"
+            f"**Supported Engines & API Key Status:**\n"
+            f"1. `gemini` (Gemini 1.5 Flash) — {gemini_set}\n"
+            f"2. `groq` (Groq Whisper Large) — {groq_set}\n"
+            f"3. `openai` (OpenAI Whisper) — {openai_set}\n"
+            f"4. `faster_whisper` (Local CPU/GPU) — Ready\n\n"
+            f"_Commands:_ `/engine gemini` _or_ `/engine groq` _to switch._\n"
+            f"_Tip: Forward any audio or voice note to this bot to transcribe instantly._"
+        )
+        try:
+            await event.edit(engine_msg, buttons=build_back_button(b"menu_engine"), parse_mode="markdown")
+        except Exception:
+            pass
+
     elif data == b"menu_export":
         chat_id_str = str(event.chat_id)
         active_tracker = tracker_manager.get_tracker_for_chat(chat_id_str)
@@ -910,6 +972,9 @@ async def bot_callback_handler(event):
             "• `/stats` or `/report` — View participant leaderboard\n"
             "• `/livestatus` — Check real-time voice call status\n"
             "• `/export` or `/csv` — Download spreadsheet\n\n"
+            "**🎙 AI Voice Transcription & Minutes:**\n"
+            "• `/engine` — Check or change AI transcription model\n"
+            "• `/transcribe` — Process audio file or voice message\n\n"
             "**👥 Group Management:**\n"
             "• `/groups` — View all monitored groups\n"
             "• `/trackhere` — Track current group\n"
@@ -925,7 +990,7 @@ async def bot_callback_handler(event):
         except Exception:
             pass
 
-# --- IN-TELEGRAM COMMAND HANDLERS ---
+# --- IN-TELEGRAM COMMAND & MEDIA HANDLERS ---
 @bot_client.on(events.NewMessage)
 async def bot_command_handler(event):
     # Auto-enroll any DM user into admin recipients so all DM interactors receive reports
@@ -941,6 +1006,42 @@ async def bot_command_handler(event):
                 db.add_admin_recipient(target, name=full_name, added_by="DM Interaction")
         except Exception as ee:
             print(f"[DM Auto-Enroll Notice] {ee}")
+
+    # Check if incoming message is an Audio / Voice Note file
+    is_audio_file = event.voice or event.audio or (event.document and any(getattr(a, "voice", False) or getattr(a, "title", False) or "audio" in getattr(event.document, "mime_type", "") for a in getattr(event.document, "attributes", [])))
+    if is_audio_file:
+        if not event.is_private:
+            is_admin = await is_sender_admin_or_owner(event)
+            if not is_admin:
+                return
+
+        try:
+            eng = transcriber.get_active_engine().upper()
+            await safe_reply(event, f"🎙 **Audio received!**\n⏳ Processing speech-to-text and generating executive summary with **{eng}**...", parse_mode="markdown")
+            download_dir = "recordings"
+            os.makedirs(download_dir, exist_ok=True)
+            saved_file = await event.download_media(file=download_dir)
+
+            if saved_file and os.path.exists(saved_file):
+                sender = await event.get_sender()
+                sname = getattr(sender, "first_name", "Voice Upload")
+                ai_res = await transcriber.process_audio_file(saved_file, chat_title=f"Audio Note ({sname})")
+
+                summary_text = f"📝 **AI Audio Summary & Minutes**\n*Engine: {ai_res['engine']}*\n\n{ai_res['summary']}"
+                await safe_reply(event, summary_text, parse_mode="markdown")
+
+                if os.path.exists(ai_res["transcript_path"]):
+                    await safe_reply(
+                        event,
+                        f"📜 **Full Verbatim Transcript** (`{ai_res['engine']}`):",
+                        file=ai_res["transcript_path"],
+                        parse_mode="markdown"
+                    )
+            else:
+                await safe_reply(event, "⚠️ Failed to download audio media file.")
+        except Exception as e:
+            await safe_reply(event, f"⚠️ **Audio Processing Error**: `{e}`\n_Ensure your GEMINI_API_KEY / GROQ_API_KEY is configured._", parse_mode="markdown")
+        return
 
     text = event.raw_text.strip()
     if not text:
@@ -1108,7 +1209,44 @@ async def bot_command_handler(event):
         else:
             await safe_reply(event, "⚠️ No stream reports found in history.", parse_mode="markdown")
 
-    # 5. ADMIN ROUTING COMMANDS
+    # 5. AI TRANSCRIPTION & ENGINE COMMANDS
+    elif cmd in ["/engine", "/aiengine"]:
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            curr = transcriber.get_active_engine().upper()
+            gemini_set = "✅ (Configured)" if os.getenv("GEMINI_API_KEY") else "❌ (Not Set)"
+            groq_set = "✅ (Configured)" if os.getenv("GROQ_API_KEY") else "❌ (Not Set)"
+            openai_set = "✅ (Configured)" if os.getenv("OPENAI_API_KEY") else "❌ (Not Set)"
+            await safe_reply(
+                event,
+                f"⚙️ **AI Speech Transcription & Summary Engine**\n\n"
+                f"• Active Engine: **{curr}**\n\n"
+                f"**Available Engines & Status:**\n"
+                f"1. `gemini` (Gemini 1.5 Flash) — {gemini_set}\n"
+                f"2. `groq` (Groq Whisper Large v3) — {groq_set}\n"
+                f"3. `openai` (OpenAI Whisper) — {openai_set}\n"
+                f"4. `faster_whisper` (Local CPU/GPU) — Ready\n\n"
+                f"_Usage:_ `/engine gemini` _or_ `/engine groq` _to switch._",
+                parse_mode="markdown"
+            )
+        else:
+            new_eng = parts[1].strip().lower()
+            if transcriber.set_active_engine(new_eng):
+                await safe_reply(event, f"✅ Active transcription engine changed to: **{new_eng.upper()}**", parse_mode="markdown")
+            else:
+                await safe_reply(event, "⚠️ Invalid engine. Choose from: `gemini`, `groq`, `openai`, `faster_whisper`.", parse_mode="markdown")
+
+    elif cmd in ["/transcribe", "/summarize", "/minutes"]:
+        await safe_reply(
+            event,
+            "🎙 **AI Voice Scribe & Audio Transcription**\n\n"
+            "To transcribe and summarize an audio note:\n"
+            "1. Simply send or forward any voice note (`.ogg`, `.mp3`, `.m4a`, `.wav`) to this bot.\n"
+            "2. The bot will automatically analyze the audio with Gemini AI, extract full transcripts, and generate executive meeting minutes!",
+            parse_mode="markdown"
+        )
+
+    # 6. ADMIN ROUTING COMMANDS
     elif cmd in ["/admins", "/adminlist"]:
         await safe_reply(event, format_admin_list_message(), parse_mode="markdown")
 
@@ -1155,7 +1293,7 @@ async def bot_command_handler(event):
             else:
                 await safe_reply(event, f"⚠️ `{target_to_remove}` was not found in database admin list.\nType `/admins` to view the list.", parse_mode="markdown")
 
-    # 6. HELP, START & MENU COMMANDS
+    # 7. HELP, START & MENU COMMANDS
     elif cmd in ["/menu", "/help", "/start", "/commands", "/options"]:
         await safe_reply(event, get_help_menu(), buttons=build_main_menu_buttons(), parse_mode="markdown")
 
@@ -1195,8 +1333,9 @@ async def raw_event_handler(event):
                 group_entity = matched_info.get("entity") if matched_info else None
 
                 ended_stream_id, csv_file = tracker_manager.end_call_by_id(call_id)
+                audio_file = await audio_recorder.recorder_instance.stop_recording(call_id)
                 if ended_stream_id and AUTO_POST_REPORT:
-                    asyncio.create_task(send_auto_report(csv_file, expected_stream_id=ended_stream_id, group_entity=group_entity, chat_title=chat_title))
+                    asyncio.create_task(send_auto_report(csv_file, expected_stream_id=ended_stream_id, group_entity=group_entity, chat_title=chat_title, audio_path=audio_file))
 
 async def background_poll_loop():
     POLL_MISS_THRESHOLD = 3  # Require 3 consecutive empty polls (~24s) before declaring call ended
@@ -1291,8 +1430,9 @@ async def background_poll_loop():
                                 print(f"\n[Polling Notice] Confirmed call ended for [{chat_title}] ({active_tracker.consecutive_empty_polls}/{POLL_MISS_THRESHOLD} checks). Finalizing stream...")
                                 call_id = active_tracker.active_call_id
                                 ended_stream_id, csv_file = tracker_manager.end_call_by_id(call_id)
+                                audio_file = await audio_recorder.recorder_instance.stop_recording(call_id)
                                 if ended_stream_id and AUTO_POST_REPORT:
-                                    asyncio.create_task(send_auto_report(csv_file, expected_stream_id=ended_stream_id, group_entity=entity, chat_title=chat_title))
+                                    asyncio.create_task(send_auto_report(csv_file, expected_stream_id=ended_stream_id, group_entity=entity, chat_title=chat_title, audio_path=audio_file))
                             else:
                                 print(f"[Polling Notice] Call not detected in full chat info for [{chat_title}] ({active_tracker.consecutive_empty_polls}/{POLL_MISS_THRESHOLD} checks). Verifying before ending...")
 
@@ -1311,6 +1451,8 @@ async def register_bot_commands():
             types.BotCommand(command="menu", description="Show full command guide & navigation"),
             types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
             types.BotCommand(command="livestatus", description="Check live status of all tracked groups"),
+            types.BotCommand(command="engine", description="View or switch AI transcription engine"),
+            types.BotCommand(command="transcribe", description="Transcribe an audio file or voice note"),
             types.BotCommand(command="groups", description="List all monitored groups & stream state"),
             types.BotCommand(command="export", description="Download CSV attendance spreadsheet"),
             types.BotCommand(command="admins", description="List admin recipients for reports"),
