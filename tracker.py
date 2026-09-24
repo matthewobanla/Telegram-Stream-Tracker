@@ -1446,27 +1446,66 @@ async def background_poll_loop():
         await asyncio.sleep(8)
 
 async def register_bot_commands():
+    """
+    Registers Telegram Bot command menus using scopes:
+    - Group Admins: Sees admin commands in groups (BotCommandScopeChatAdmins).
+    - Regular Group Members: Menu is completely hidden (BotCommandScopeChats with empty list).
+    - Private DMs: Full navigation menu (BotCommandScopeUsers).
+    """
+    admin_group_commands = [
+        types.BotCommand(command="menu", description="Interactive admin control panel & menu"),
+        types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
+        types.BotCommand(command="livestatus", description="Check live status of tracked groups"),
+        types.BotCommand(command="trackhere", description="Start tracking current group"),
+        types.BotCommand(command="export", description="Download CSV attendance spreadsheet"),
+        types.BotCommand(command="engine", description="View / switch AI transcription engine"),
+        types.BotCommand(command="help", description="Show admin help & command guide")
+    ]
+
+    dm_commands = [
+        types.BotCommand(command="menu", description="Show full control panel & navigation"),
+        types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
+        types.BotCommand(command="livestatus", description="Check live status of all tracked groups"),
+        types.BotCommand(command="groups", description="List all monitored groups & stream state"),
+        types.BotCommand(command="admins", description="List admin recipients for reports"),
+        types.BotCommand(command="addadmin", description="Add an admin recipient for reports"),
+        types.BotCommand(command="engine", description="View or switch AI transcription engine"),
+        types.BotCommand(command="transcribe", description="Transcribe an audio file or voice note"),
+        types.BotCommand(command="export", description="Download CSV attendance spreadsheet"),
+        types.BotCommand(command="help", description="Show full help & usage guide")
+    ]
+
     try:
-        commands = [
-            types.BotCommand(command="menu", description="Show full command guide & navigation"),
-            types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
-            types.BotCommand(command="livestatus", description="Check live status of all tracked groups"),
-            types.BotCommand(command="engine", description="View or switch AI transcription engine"),
-            types.BotCommand(command="transcribe", description="Transcribe an audio file or voice note"),
-            types.BotCommand(command="groups", description="List all monitored groups & stream state"),
-            types.BotCommand(command="export", description="Download CSV attendance spreadsheet"),
-            types.BotCommand(command="admins", description="List admin recipients for reports"),
-            types.BotCommand(command="addadmin", description="Add an admin to receive post-stream reports"),
-            types.BotCommand(command="trackhere", description="Start tracking current group (run in group)"),
-            types.BotCommand(command="help", description="Show full help & usage guide")
-        ]
+        # 1. Group Administrators only (Supergroups & Groups)
+        await bot_client(functions.bots.SetBotCommandsRequest(
+            scope=types.BotCommandScopeChatAdmins(),
+            lang_code="",
+            commands=admin_group_commands
+        ))
+
+        # 2. All Group Chats (Regular members get empty list so the [/] menu is hidden from them)
+        await bot_client(functions.bots.SetBotCommandsRequest(
+            scope=types.BotCommandScopeChats(),
+            lang_code="",
+            commands=[]
+        ))
+
+        # 3. Private DMs with the Bot
+        await bot_client(functions.bots.SetBotCommandsRequest(
+            scope=types.BotCommandScopeUsers(),
+            lang_code="",
+            commands=dm_commands
+        ))
+
+        # 4. Default Scope fallback (Empty to prevent leaking commands to non-admin contexts)
         await bot_client(functions.bots.SetBotCommandsRequest(
             scope=types.BotCommandScopeDefault(),
             lang_code="",
-            commands=commands
+            commands=[]
         ))
-    except Exception:
-        pass
+        print("[Bot Commands] Successfully configured scoped command menus (Admin-only for groups).")
+    except Exception as e:
+        print(f"[Bot Commands Registration Notice] {e}")
 
 async def sync_bot_dialogs():
     """Syncs existing DM conversations to admin_recipients and existing groups to tracked_groups."""
