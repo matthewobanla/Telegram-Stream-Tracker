@@ -21,8 +21,8 @@ session_string.txt
 *.sqlite3
 
 # Reports & exports
-reports/*.csv
-!reports/.gitkeep
+# Allow tracking reports/*.csv so cloud deployments have past stream history
+!reports/*.csv
 recordings/
 transcripts/
 

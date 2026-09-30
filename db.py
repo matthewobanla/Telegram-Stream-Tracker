@@ -423,14 +423,24 @@ def sync_all_csv_reports_to_db(reports_dir="reports"):
         return
     with get_connection() as conn:
         c = conn.cursor()
-        for fname in os.listdir(reports_dir):
+        for fname in sorted(os.listdir(reports_dir)):
             if not fname.endswith(".csv") or fname.startswith("."):
                 continue
             filepath = os.path.join(reports_dir, fname)
-            clean_name = os.path.splitext(fname)[0]
-            stream_id = f"stream_{clean_name}"
             
-            c.execute("SELECT COUNT(*) FROM streams WHERE stream_id = ? OR csv_path = ?", (stream_id, filepath))
+            match = re.search(r"(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", fname)
+            if match:
+                y, m, d, hh, mm, ss = match.groups()
+                timestamp_key = f"{y}{m}{d}_{hh}{mm}{ss}"
+                stream_id = f"stream_{timestamp_key}"
+                start_time_iso = f"{y}-{m}-{d}T{hh}:{mm}:{ss}"
+            else:
+                mtime = os.path.getmtime(filepath)
+                start_time_iso = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+                clean_name = os.path.splitext(fname)[0]
+                stream_id = f"stream_{clean_name}"
+
+            c.execute("SELECT COUNT(*) FROM streams WHERE stream_id = ? OR start_time = ? OR csv_path = ?", (stream_id, start_time_iso, filepath))
             if c.fetchone()[0] > 0:
                 continue
             
@@ -449,14 +459,6 @@ def sync_all_csv_reports_to_db(reports_dir="reports"):
                                 max_dur_min = d
                         except Exception:
                             pass
-                    
-                    match = re.search(r"(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", fname)
-                    if match:
-                        y, m, d, hh, mm, ss = match.groups()
-                        start_time_iso = f"{y}-{m}-{d}T{hh}:{mm}:{ss}"
-                    else:
-                        mtime = os.path.getmtime(filepath)
-                        start_time_iso = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
                     
                     duration_sec = max_dur_min * 60.0 if max_dur_min > 0 else 60.0
                     chat_title = "CHURCH IS HERE |||| KINGS' HUB BC"
@@ -509,8 +511,8 @@ def get_all_streams(chat_id=None):
             """, (cid_str, f"%{clean_id}%", f"%{cid_str}%"))
             rows = [dict(r) for r in c.fetchall()]
 
-        # Fallback to all streams if specific chat filter has only 1 or 0 records
-        if len(rows) <= 1:
+        # Fallback to all streams if specific chat filter returns nothing
+        if not rows:
             c.execute("""
             SELECT * FROM streams 
             WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0)
