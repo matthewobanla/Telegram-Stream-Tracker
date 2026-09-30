@@ -881,33 +881,17 @@ def build_back_button(refresh_key=None):
     row.append(Button.inline("« Back to Menu", b"menu_main"))
     return [row]
 
-async def is_user_authorized_admin(user_id, username=None):
-    """Checks whether a user is an authorized admin via Config, Database, or Admin status in any tracked group."""
+def is_user_authorized_admin(user_id, username=None):
+    """Checks whether a user is an authorized admin via Config or Database admin recipients (instant check)."""
     if not user_id:
         return False
 
     uid_str = str(user_id).strip()
     uname_clean = str(username).lower().lstrip("@") if username else ""
 
-    # 1. Check if user is in configured / database admin recipients
     all_admins = get_all_admin_recipients()
     admin_keys = [str(a).lower().lstrip("@") for a in all_admins]
-    if uid_str in admin_keys or (uname_clean and uname_clean in admin_keys):
-        return True
-
-    # 2. Check if user is an admin in any of the tracked groups
-    for eid, info in tracked_entities.items():
-        entity = info.get("entity")
-        if not entity:
-            continue
-        try:
-            perms = await user_client.get_permissions(entity, user_id)
-            if perms and (perms.is_admin or perms.is_creator or getattr(perms, "admin_rights", None)):
-                return True
-        except Exception:
-            pass
-
-    return False
+    return (uid_str in admin_keys) or bool(uname_clean and uname_clean in admin_keys)
 
 async def is_sender_admin_or_owner(event):
     """Verifies whether the sender is a Telegram group administrator/creator or a configured bot admin."""
@@ -1181,7 +1165,7 @@ async def bot_command_handler(event):
             if sender and not getattr(sender, "bot", False):
                 sender_id = sender.id
                 username = getattr(sender, "username", "")
-                is_admin = await is_user_authorized_admin(sender_id, username)
+                is_admin = is_user_authorized_admin(sender_id, username)
                 if is_admin:
                     first = getattr(sender, "first_name", "") or ""
                     last = getattr(sender, "last_name", "") or ""
@@ -1744,7 +1728,7 @@ async def sync_bot_dialogs():
             entity = d.entity
             if d.is_user and not getattr(entity, "bot", False):
                 username = getattr(entity, "username", "")
-                is_admin = await is_user_authorized_admin(d.id, username)
+                is_admin = is_user_authorized_admin(d.id, username)
                 if is_admin:
                     first = getattr(entity, "first_name", "") or ""
                     last = getattr(entity, "last_name", "") or ""
