@@ -881,6 +881,34 @@ def build_back_button(refresh_key=None):
     row.append(Button.inline("« Back to Menu", b"menu_main"))
     return [row]
 
+async def is_user_authorized_admin(user_id, username=None):
+    """Checks whether a user is an authorized admin via Config, Database, or Admin status in any tracked group."""
+    if not user_id:
+        return False
+
+    uid_str = str(user_id).strip()
+    uname_clean = str(username).lower().lstrip("@") if username else ""
+
+    # 1. Check if user is in configured / database admin recipients
+    all_admins = get_all_admin_recipients()
+    admin_keys = [str(a).lower().lstrip("@") for a in all_admins]
+    if uid_str in admin_keys or (uname_clean and uname_clean in admin_keys):
+        return True
+
+    # 2. Check if user is an admin in any of the tracked groups
+    for eid, info in tracked_entities.items():
+        entity = info.get("entity")
+        if not entity:
+            continue
+        try:
+            perms = await user_client.get_permissions(entity, user_id)
+            if perms and (perms.is_admin or perms.is_creator or getattr(perms, "admin_rights", None)):
+                return True
+        except Exception:
+            pass
+
+    return False
+
 async def is_sender_admin_or_owner(event):
     """Verifies whether the sender is a Telegram group administrator/creator or a configured bot admin."""
     if event.is_private:
@@ -1146,19 +1174,22 @@ async def bot_callback_handler(event):
 # --- IN-TELEGRAM COMMAND & MEDIA HANDLERS ---
 @bot_client.on(events.NewMessage)
 async def bot_command_handler(event):
-    # Auto-enroll any DM user into admin recipients so all DM interactors receive reports
+    # Auto-enroll DM user into admin recipients ONLY IF they are an authorized group admin or in admin list
     if event.is_private:
         try:
             sender = await event.get_sender()
             if sender and not getattr(sender, "bot", False):
-                first = getattr(sender, "first_name", "") or ""
-                last = getattr(sender, "last_name", "") or ""
-                full_name = f"{first} {last}".strip() or f"User {event.sender_id}"
+                sender_id = sender.id
                 username = getattr(sender, "username", "")
-                target = f"@{username}" if username else str(event.chat_id)
-                db.add_admin_recipient(target, name=full_name, added_by="DM Interaction")
+                is_admin = await is_user_authorized_admin(sender_id, username)
+                if is_admin:
+                    first = getattr(sender, "first_name", "") or ""
+                    last = getattr(sender, "last_name", "") or ""
+                    full_name = f"{first} {last}".strip() or f"Admin {sender_id}"
+                    target = f"@{username}" if username else str(event.chat_id)
+                    db.add_admin_recipient(target, name=full_name, added_by="Group Admin Sync")
         except Exception as ee:
-            print(f"[DM Auto-Enroll Notice] {ee}")
+            print(f"[DM Admin Check Notice] {ee}")
 
     # Check if incoming message is an Audio / Voice Note file (Transcriptions strictly in private DM)
     is_audio_file = event.voice or event.audio or (event.document and any(getattr(a, "voice", False) or getattr(a, "title", False) or "audio" in getattr(event.document, "mime_type", "") for a in getattr(event.document, "attributes", [])))
@@ -1704,27 +1735,29 @@ async def register_bot_commands():
         print(f"[Bot Commands Registration Notice] {e}")
 
 async def sync_bot_dialogs():
-    """Syncs existing DM conversations to admin_recipients and existing groups to tracked_groups."""
+    """Syncs existing DM conversations to admin_recipients ONLY if the user is an authorized admin."""
     try:
-        print("[Bot Sync] Syncing existing bot DM dialogs into admin recipients...")
+        print("[Bot Sync] Verifying bot DM dialogs for authorized administrators...")
         dialogs = await bot_client.get_dialogs(limit=250)
         synced_count = 0
         for d in dialogs:
             entity = d.entity
             if d.is_user and not getattr(entity, "bot", False):
-                first = getattr(entity, "first_name", "") or ""
-                last = getattr(entity, "last_name", "") or ""
-                full_name = f"{first} {last}".strip() or f"User {d.id}"
                 username = getattr(entity, "username", "")
-                target = f"@{username}" if username else str(d.id)
-                if db.add_admin_recipient(target, name=full_name, added_by="DM Interaction"):
-                    synced_count += 1
+                is_admin = await is_user_authorized_admin(d.id, username)
+                if is_admin:
+                    first = getattr(entity, "first_name", "") or ""
+                    last = getattr(entity, "last_name", "") or ""
+                    full_name = f"{first} {last}".strip() or f"Admin {d.id}"
+                    target = f"@{username}" if username else str(d.id)
+                    if db.add_admin_recipient(target, name=full_name, added_by="Group Admin Sync"):
+                        synced_count += 1
             elif d.is_group or d.is_channel:
                 title = getattr(entity, "title", "") or f"Group {d.id}"
                 username = getattr(entity, "username", "")
                 target = f"@{username}" if username else str(d.id)
                 db.update_tracked_group_info(target, title, str(d.id))
-        print(f"[Bot Sync] Dialogs sync completed. Total admins now: {len(db.get_admin_recipients())}")
+        print(f"[Bot Sync] Dialogs sync completed. Total verified admin recipients: {len(db.get_admin_recipients())}")
     except Exception as e:
         print(f"[Bot Dialogs Sync Notice] {e}")
 
