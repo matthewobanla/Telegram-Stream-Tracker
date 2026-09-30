@@ -194,6 +194,8 @@ def add_admin_recipient(target, name="", added_by="Owner"):
     target = str(target).strip()
     if not target:
         return False
+    if not target.startswith("@") and not target.isdigit() and not (target.startswith("-") and target[1:].isdigit()):
+        target = f"@{target}"
     with get_connection() as conn:
         c = conn.cursor()
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
