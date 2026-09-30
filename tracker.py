@@ -623,6 +623,34 @@ def format_groups_list_message():
     msg += "\n_Use `/trackhere` in any group or `/addgroup @group` to add more._"
     return msg
 
+def format_stream_history_message(chat_id=None, limit=8):
+    rows = db.get_stream_history(limit=limit, chat_id=chat_id)
+    if not rows:
+        return "⚠️ No past stream records found in database."
+
+    msg = f"📜 **Past Stream Sessions History** ({len(rows)} recent):\n\n"
+    for idx, r in enumerate(rows, 1):
+        title = r.get("chat_title", "Voice Stream")
+        duration_m = (r.get("duration_sec", 0) or 0) / 60.0
+        part_count = r.get("total_participants", 0)
+        start_time = r.get("start_time", "")
+        if start_time:
+            try:
+                dt = datetime.datetime.fromisoformat(start_time)
+                time_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+            except Exception:
+                time_str = start_time[:16]
+        else:
+            time_str = "Unknown time"
+
+        msg += f"`#{idx:02d}` **{title}**\n"
+        msg += f"    ├ 📅 {time_str}\n"
+        msg += f"    ├ ⏱ Duration: `{duration_m:.1f} mins`\n"
+        msg += f"    └ 👥 Total Callers: `{part_count}`\n\n"
+
+    msg += "_Type `/stats` or `/export` to retrieve the latest report & CSV spreadsheet._"
+    return msg
+
 async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None, chat_title="", audio_path=None):
     """Sends the post-stream report, CSV, and AI Speech-to-Text Summary directly to configured admin(s) and/or group."""
     if not AUTO_POST_REPORT:
@@ -745,6 +773,7 @@ def get_help_menu():
         "**📊 Attendance & Reports**\n"
         "• `/menu` or `/help` — Display this command menu\n"
         "• `/stats` or `/report` — View participant leaderboard & attendance %\n"
+        "• `/history` or `/streams` — View log of past stream sessions & metrics\n"
         "• `/livestatus` — Check live voice chat status across all tracked groups\n"
         "• `/export` or `/csv` — Download the attendance CSV spreadsheet\n\n"
         "**🎙 AI Speech-to-Text & Minutes**\n"
@@ -768,9 +797,9 @@ def get_help_menu():
 def build_main_menu_buttons():
     return [
         [Button.inline("📊 Live Stats / Leaderboard", b"menu_stats"), Button.inline("🔴 Live Status", b"menu_status")],
-        [Button.inline("📄 Download CSV Report", b"menu_export"), Button.inline("👥 Tracked Groups", b"menu_groups")],
-        [Button.inline("🎙 AI Scribe & Engine", b"menu_engine"), Button.inline("👑 Admin Recipients", b"menu_admins")],
-        [Button.inline("ℹ️ Help & Commands", b"menu_help")]
+        [Button.inline("📜 Stream History", b"menu_history"), Button.inline("📄 Download CSV Report", b"menu_export")],
+        [Button.inline("👥 Tracked Groups", b"menu_groups"), Button.inline("👑 Admin Recipients", b"menu_admins")],
+        [Button.inline("🎙 AI Scribe & Engine", b"menu_engine"), Button.inline("ℹ️ Help & Commands", b"menu_help")]
     ]
 
 def build_back_button(refresh_key=None):
@@ -892,6 +921,14 @@ async def bot_callback_handler(event):
         except Exception:
             pass
 
+    elif data == b"menu_history":
+        target_filter = None if event.is_private else str(event.chat_id)
+        msg = format_stream_history_message(chat_id=target_filter, limit=8)
+        try:
+            await event.edit(msg, buttons=build_back_button(b"menu_history"), parse_mode="markdown")
+        except Exception:
+            pass
+
     elif data == b"menu_groups":
         msg = format_groups_list_message()
         try:
@@ -970,6 +1007,7 @@ async def bot_callback_handler(event):
             "📖 **Full Command Guide**\n\n"
             "**📊 Stream Reports:**\n"
             "• `/stats` or `/report` — View participant leaderboard\n"
+            "• `/history` or `/streams` — View past stream sessions history\n"
             "• `/livestatus` — Check real-time voice call status\n"
             "• `/export` or `/csv` — Download spreadsheet\n\n"
             "**🎙 AI Voice Transcription & Minutes:**\n"
@@ -1007,13 +1045,12 @@ async def bot_command_handler(event):
         except Exception as ee:
             print(f"[DM Auto-Enroll Notice] {ee}")
 
-    # Check if incoming message is an Audio / Voice Note file
+    # Check if incoming message is an Audio / Voice Note file (Transcriptions strictly in private DM)
     is_audio_file = event.voice or event.audio or (event.document and any(getattr(a, "voice", False) or getattr(a, "title", False) or "audio" in getattr(event.document, "mime_type", "") for a in getattr(event.document, "attributes", [])))
     if is_audio_file:
+        # Ignore audio files dropped in group chats; transcribe only in private DM with the bot
         if not event.is_private:
-            is_admin = await is_sender_admin_or_owner(event)
-            if not is_admin:
-                return
+            return
 
         try:
             eng = transcriber.get_active_engine().upper()
@@ -1178,7 +1215,13 @@ async def bot_command_handler(event):
                 parse_mode="markdown"
             )
 
-    # 4. EXPORT SPREADSHEET COMMAND
+    # 4. STREAM HISTORY COMMAND
+    elif cmd in ["/history", "/paststreams", "/streams"]:
+        target_filter = None if event.is_private else str(event.chat_id)
+        msg = format_stream_history_message(chat_id=target_filter, limit=10)
+        await safe_reply(event, msg, parse_mode="markdown")
+
+    # 5. EXPORT SPREADSHEET COMMAND
     elif cmd in ["/export", "/csv"]:
         chat_id_str = str(event.chat_id)
         active_tracker = tracker_manager.get_tracker_for_chat(chat_id_str)
@@ -1241,8 +1284,8 @@ async def bot_command_handler(event):
             event,
             "🎙 **AI Voice Scribe & Audio Transcription**\n\n"
             "To transcribe and summarize an audio note:\n"
-            "1. Simply send or forward any voice note (`.ogg`, `.mp3`, `.m4a`, `.wav`) to this bot.\n"
-            "2. The bot will automatically analyze the audio with Gemini AI, extract full transcripts, and generate executive meeting minutes!",
+            "1. Send or forward any voice note (`.ogg`, `.mp3`, `.m4a`, `.wav`) to this bot in **private DM**.\n"
+            "2. The bot will automatically analyze the audio with AI, extract full transcripts, and generate executive meeting minutes in your DM!",
             parse_mode="markdown"
         )
 
@@ -1455,6 +1498,7 @@ async def register_bot_commands():
     admin_group_commands = [
         types.BotCommand(command="menu", description="Interactive admin control panel & menu"),
         types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
+        types.BotCommand(command="history", description="Show past stream sessions history"),
         types.BotCommand(command="livestatus", description="Check live status of tracked groups"),
         types.BotCommand(command="trackhere", description="Start tracking current group"),
         types.BotCommand(command="export", description="Download CSV attendance spreadsheet"),
@@ -1465,6 +1509,7 @@ async def register_bot_commands():
     dm_commands = [
         types.BotCommand(command="menu", description="Show full control panel & navigation"),
         types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
+        types.BotCommand(command="history", description="Show past stream sessions history"),
         types.BotCommand(command="livestatus", description="Check live status of all tracked groups"),
         types.BotCommand(command="groups", description="List all monitored groups & stream state"),
         types.BotCommand(command="admins", description="List admin recipients for reports"),

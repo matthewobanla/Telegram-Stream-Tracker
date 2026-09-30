@@ -169,6 +169,7 @@ Members and admins can use the following commands in any group or in private DM 
 | **`/removegroup @group`** | Removes a group from tracking. |
 | **`/groups`** | Lists all currently tracked groups and their real-time live stream statuses. |
 | **`/stats`** or **`/report`** | Displays the top 20 participant leaderboard and duration statistics for the active stream or last completed stream. |
+| **`/history`** or **`/streams`** | Lists past recorded stream sessions (dates, durations, total callers). |
 | **`/livestatus`** | Checks if a live stream is currently active across all tracked groups with elapsed time and online count. |
 | **`/export`** or **`/csv`** | Generates and sends the complete `.csv` participation spreadsheet directly in the chat. |
 | **`/admins`** | Lists all configured admins receiving auto-reports. |
