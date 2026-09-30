@@ -3,8 +3,10 @@ import datetime
 import os
 import csv
 import re
+import json
 
 DB_PATH = os.getenv("DB_PATH", "tracker.db")
+ADMINS_JSON_FILE = os.getenv("ADMINS_JSON_FILE", "admins.json")
 
 SEED_STREAM_ID = "stream_20260814_201200_-5734923756965228090"
 SEED_PARTICIPANTS = [
@@ -180,7 +182,44 @@ def update_tracked_group_info(target, title, entity_id):
         c = conn.cursor()
         c.execute("UPDATE tracked_groups SET title = ?, entity_id = ? WHERE target = ? OR entity_id = ?", (title, str(entity_id), str(target), str(entity_id)))
 
+def _save_admins_to_json():
+    try:
+        with get_connection() as conn:
+            c = conn.cursor()
+            try:
+                c.execute("SELECT target, name, added_by FROM admin_recipients ORDER BY id ASC")
+                admins = [dict(row) for row in c.fetchall()]
+            except Exception:
+                admins = []
+        if admins:
+            with open(ADMINS_JSON_FILE, "w", encoding="utf-8") as f:
+                json.dump(admins, f, indent=2)
+    except Exception:
+        pass
+
+def _sync_admins_from_json():
+    if not os.path.exists(ADMINS_JSON_FILE):
+        return
+    try:
+        with open(ADMINS_JSON_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        target = item.get("target")
+                        name = item.get("name", "")
+                        added_by = item.get("added_by", "JSON Backup")
+                        if target:
+                            add_admin_recipient(target, name=name, added_by=added_by, skip_json_write=True)
+    except Exception:
+        pass
+
 def get_admin_recipients():
+    try:
+        _sync_admins_from_json()
+    except Exception:
+        pass
+
     with get_connection() as conn:
         c = conn.cursor()
         try:
@@ -190,12 +229,13 @@ def get_admin_recipients():
             c.execute("SELECT target FROM admin_recipients ORDER BY id ASC")
             return [{"target": row["target"], "name": "", "added_by": ""} for row in c.fetchall()]
 
-def add_admin_recipient(target, name="", added_by="Owner"):
+def add_admin_recipient(target, name="", added_by="Owner", skip_json_write=False):
     target = str(target).strip()
     if not target:
         return False
     if not target.startswith("@") and not target.isdigit() and not (target.startswith("-") and target[1:].isdigit()):
         target = f"@{target}"
+    success = False
     with get_connection() as conn:
         c = conn.cursor()
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -210,20 +250,27 @@ def add_admin_recipient(target, name="", added_by="Owner"):
             ON CONFLICT(target) DO UPDATE SET 
                 name = CASE WHEN excluded.name != '' THEN excluded.name ELSE admin_recipients.name END
             """, (target, str(name), str(added_by), now_str))
-            return True
+            success = True
         except Exception as e:
             try:
                 c.execute("INSERT OR IGNORE INTO admin_recipients (target, added_by, added_at) VALUES (?, ?, ?)", (target, str(added_by), now_str))
-                return True
+                success = True
             except Exception:
-                return False
+                success = False
+
+    if success and not skip_json_write:
+        _save_admins_to_json()
+    return success
 
 def remove_admin_recipient(target):
     target = target.strip()
     with get_connection() as conn:
         c = conn.cursor()
         c.execute("DELETE FROM admin_recipients WHERE LOWER(target) = LOWER(?) OR target = ?", (target, target))
-        return c.rowcount > 0
+        removed = c.rowcount > 0
+    if removed:
+        _save_admins_to_json()
+    return removed
 
 def save_stream_start(stream_id, call_id, chat_title, start_time_dt, chat_id=""):
     with get_connection() as conn:

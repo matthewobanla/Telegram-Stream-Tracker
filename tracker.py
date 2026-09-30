@@ -409,6 +409,7 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
             tracked_targets_map[username.lower()] = info
 
         print(f"[Tracked Group Added] ✅ '{title}' (ID: {entity_id_str}, Target: {formatted_target})")
+        asyncio.create_task(sync_group_admins_for_entity(entity))
         return True, f"✅ Successfully added group: **{title}** (`{formatted_target}`)"
 
     # 5. Fallback if user_client cannot resolve yet, but we have chat_hint from bot
@@ -428,9 +429,31 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
             tracked_targets_map[f"@{username.lower()}"] = info
 
         print(f"[Tracked Group Added via Bot Hint] ✅ '{title}' (ID: {entity_id_str})")
+        asyncio.create_task(sync_group_admins_for_entity(chat_hint))
         return True, f"✅ Successfully registered group: **{title}** (`{formatted_target}`)\n\n_Note: Please ensure your user account is also a member of this group so it can listen to live voice calls._"
 
     return False, f"⚠️ Could not resolve target `{target_str}`.\n_Ensure the user account is a member of the group or invite the bot to the group and use `/trackhere`._"
+
+async def sync_group_admins_for_entity(entity):
+    """Automatically queries and syncs all Telegram administrators from a tracked group into admin_recipients."""
+    try:
+        if not entity:
+            return
+        participants = await user_client.get_participants(entity, filter=types.ChannelParticipantsAdmins)
+        count = 0
+        for p in participants:
+            if not getattr(p, "bot", False):
+                username = getattr(p, "username", "")
+                first = getattr(p, "first_name", "") or ""
+                last = getattr(p, "last_name", "") or ""
+                full_name = f"{first} {last}".strip() or f"Admin {p.id}"
+                target = f"@{username}" if username else str(p.id)
+                if db.add_admin_recipient(target, name=full_name, added_by="Group Admin Sync"):
+                    count += 1
+        if count > 0:
+            print(f"[Admin Auto-Sync] Synced {count} admin(s) from group '{getattr(entity, 'title', entity)}'")
+    except Exception:
+        pass
 
 async def untrack_target(target_val):
     """Removes a target group from tracking."""
