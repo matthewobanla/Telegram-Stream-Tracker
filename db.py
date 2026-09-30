@@ -439,7 +439,8 @@ def sync_all_csv_reports_to_db(reports_dir="reports"):
             except Exception as e:
                 print(f"[DB Sync CSV Notice] Failed to sync {fname}: {e}")
 
-def get_stream_history(limit=50, chat_id=None):
+def get_all_streams(chat_id=None):
+    """Returns all completed streams with 1-based sequential index numbers (1 = first, N = latest)."""
     try:
         sync_all_csv_reports_to_db()
     except Exception:
@@ -455,8 +456,8 @@ def get_stream_history(limit=50, chat_id=None):
             SELECT * FROM streams 
             WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0)
               AND (chat_id = ? OR chat_id LIKE ? OR chat_title LIKE ?)
-            ORDER BY start_time DESC, rowid DESC LIMIT ?
-            """, (cid_str, f"%{clean_id}%", f"%{cid_str}%", limit))
+            ORDER BY start_time ASC, rowid ASC
+            """, (cid_str, f"%{clean_id}%", f"%{cid_str}%"))
             rows = [dict(r) for r in c.fetchall()]
 
         # Fallback to all streams if specific chat filter has only 1 or 0 records
@@ -464,8 +465,90 @@ def get_stream_history(limit=50, chat_id=None):
             c.execute("""
             SELECT * FROM streams 
             WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0)
-            ORDER BY start_time DESC, rowid DESC LIMIT ?
-            """, (limit,))
+            ORDER BY start_time ASC, rowid ASC
+            """)
             rows = [dict(r) for r in c.fetchall()]
 
+        for idx, r in enumerate(rows, 1):
+            r["index_num"] = idx
+
         return rows
+
+def get_stream_by_index(index_num, chat_id=None):
+    """Fetches a stream by its 1-based sequential index number."""
+    all_streams = get_all_streams(chat_id=chat_id)
+    target_idx = int(index_num)
+    for s in all_streams:
+        if s.get("index_num") == target_idx:
+            return s
+    return None
+
+def get_stream_by_id(stream_id):
+    """Fetches a stream and its participants by stream_id."""
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM streams WHERE stream_id = ?", (stream_id,))
+        row = c.fetchone()
+        if not row:
+            return None, []
+        c.execute("SELECT * FROM participants WHERE stream_id = ? ORDER BY total_sec DESC", (stream_id,))
+        parts = [dict(p) for p in c.fetchall()]
+        return dict(row), parts
+
+def get_or_generate_csv_for_stream(stream_id_or_index, chat_id=None):
+    """Returns the filepath to the CSV for a specific stream (by index or stream_id), generating it from DB if missing."""
+    stream_meta = None
+    participants = []
+    
+    if str(stream_id_or_index).isdigit():
+        stream_meta = get_stream_by_index(int(stream_id_or_index), chat_id=chat_id)
+        if stream_meta:
+            _, participants = get_stream_by_id(stream_meta["stream_id"])
+    else:
+        stream_meta, participants = get_stream_by_id(str(stream_id_or_index))
+
+    if not stream_meta:
+        return None, None
+
+    csv_path = stream_meta.get("csv_path")
+    if csv_path and os.path.exists(csv_path) and os.path.getsize(csv_path) > 30:
+        return csv_path, stream_meta
+
+    if not participants:
+        _, participants = get_stream_by_id(stream_meta["stream_id"])
+
+    os.makedirs("reports", exist_ok=True)
+    safe_title = "".join([c if c.isalnum() else "_" for c in stream_meta.get("chat_title", "stream")])[:20]
+    start_clean = str(stream_meta.get("start_time", "session"))[:19].replace(":", "").replace("-", "_").replace("T", "_")
+    filename = f"report_{safe_title}_{start_clean}.csv"
+    filepath = os.path.join("reports", filename)
+
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Rank", "User ID", "Name", "Username", "First Join (UTC)", "Last Leave (UTC)", "Session Count", "Total Duration (Minutes)", "Participation (%)"])
+        for rank, p in enumerate(participants, 1):
+            writer.writerow([
+                rank,
+                p.get("user_id", ""),
+                p.get("name", ""),
+                p.get("username", ""),
+                p.get("first_join", ""),
+                p.get("last_leave", ""),
+                p.get("session_count", 1),
+                f"{p.get('total_min', 0.0):.2f}",
+                f"{p.get('pct', 0.0):.2f}"
+            ])
+
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE streams SET csv_path = ? WHERE stream_id = ?", (filepath, stream_meta["stream_id"]))
+
+    return filepath, stream_meta
+
+def get_stream_history(limit=50, chat_id=None):
+    all_streams = get_all_streams(chat_id=chat_id)
+    # Return newest streams first
+    rev = list(reversed(all_streams))
+    if limit:
+        return rev[:limit]
+    return rev

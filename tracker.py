@@ -623,13 +623,28 @@ def format_groups_list_message():
     msg += "\n_Use `/trackhere` in any group or `/addgroup @group` to add more._"
     return msg
 
-def format_stream_history_message(chat_id=None, limit=50):
-    rows = db.get_stream_history(limit=limit, chat_id=chat_id)
-    if not rows:
-        return "⚠️ No past stream records found in database."
+def build_stream_history_page(page=1, page_size=10, chat_id=None):
+    """Builds a paginated 10-item stream history view with direct CSV export buttons."""
+    all_streams = db.get_all_streams(chat_id=chat_id)
+    if not all_streams:
+        return "⚠️ No past stream records found in database.", build_back_button()
 
-    msg = f"📜 **All Recorded Stream Sessions** ({len(rows)} total):\n\n"
-    for idx, r in enumerate(rows, 1):
+    total_items = len(all_streams)
+    # Sort newest streams first for browsing
+    reversed_streams = list(reversed(all_streams))
+    
+    total_pages = max(1, (total_items + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    
+    start_idx = (page - 1) * page_size
+    end_idx = min(start_idx + page_size, total_items)
+    page_items = reversed_streams[start_idx:end_idx]
+
+    msg = f"📜 **Recorded Stream Sessions History**\n"
+    msg += f"_Showing {start_idx + 1}–{end_idx} of {total_items} total recorded streams (Page {page}/{total_pages}):_\n\n"
+
+    for r in page_items:
+        idx_num = r.get("index_num", 1)
         title = r.get("chat_title", "Voice Stream")
         duration_m = (r.get("duration_sec", 0) or 0) / 60.0
         part_count = r.get("total_participants", 0)
@@ -643,12 +658,46 @@ def format_stream_history_message(chat_id=None, limit=50):
         else:
             time_str = "Unknown time"
 
-        msg += f"`#{idx:02d}` **{title}**\n"
+        msg += f"`#{idx_num:02d}` **{title}**\n"
         msg += f"    ├ 📅 {time_str}\n"
-        msg += f"    ├ ⏱ Duration: `{duration_m:.1f} mins`\n"
-        msg += f"    └ 👥 Total Callers: `{part_count}`\n\n"
+        msg += f"    ├ ⏱ `{duration_m:.1f} mins` | 👥 `{part_count} callers`\n"
+        msg += f"    └ 📥 Download CSV: `/export {idx_num}`\n\n"
 
-    msg += "_Type `/stats` or `/export` to retrieve the latest report & CSV spreadsheet._"
+    msg += "💡 _Tap a button below or type `/export <number>` to download any stream's CSV spreadsheet._"
+
+    # Build inline buttons
+    buttons = []
+    
+    # 1. Direct CSV download buttons in rows of 5
+    export_buttons = []
+    for r in page_items:
+        num = r.get("index_num", 1)
+        export_buttons.append(Button.inline(f"📥 #{num:02d}", f"exp_stream_{num}".encode()))
+    
+    for i in range(0, len(export_buttons), 5):
+        buttons.append(export_buttons[i:i+5])
+
+    # 2. Pagination controls row
+    nav_row = []
+    if page > 1:
+        nav_row.append(Button.inline("⬅️ Prev", f"hist_page_{page-1}".encode()))
+    else:
+        nav_row.append(Button.inline("⏹ First", b"hist_noop"))
+
+    nav_row.append(Button.inline(f"📄 {page}/{total_pages}", f"hist_page_{page}".encode()))
+
+    if page < total_pages:
+        nav_row.append(Button.inline("Next ➡️", f"hist_page_{page+1}".encode()))
+    else:
+        nav_row.append(Button.inline("⏹ Last", b"hist_noop"))
+
+    buttons.append(nav_row)
+    buttons.append([Button.inline("« Back to Menu", b"menu_main")])
+
+    return msg, buttons
+
+def format_stream_history_message(chat_id=None, limit=10):
+    msg, _ = build_stream_history_page(page=1, page_size=limit, chat_id=chat_id)
     return msg
 
 async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None, chat_title="", audio_path=None):
@@ -923,11 +972,54 @@ async def bot_callback_handler(event):
 
     elif data == b"menu_history":
         target_filter = None if event.is_private else str(event.chat_id)
-        msg = format_stream_history_message(chat_id=target_filter, limit=50)
+        msg, btns = build_stream_history_page(page=1, page_size=10, chat_id=target_filter)
         try:
-            await event.edit(msg, buttons=build_back_button(b"menu_history"), parse_mode="markdown")
+            await event.edit(msg, buttons=btns, parse_mode="markdown")
         except Exception:
             pass
+
+    elif data == b"hist_noop":
+        try:
+            await event.answer("ℹ️ You are on the first or last page.")
+        except Exception:
+            pass
+
+    elif data.startswith(b"hist_page_"):
+        try:
+            page_num = int(data.decode().split("_")[-1])
+        except Exception:
+            page_num = 1
+        target_filter = None if event.is_private else str(event.chat_id)
+        msg, btns = build_stream_history_page(page=page_num, page_size=10, chat_id=target_filter)
+        try:
+            await event.edit(msg, buttons=btns, parse_mode="markdown")
+        except Exception:
+            pass
+
+    elif data.startswith(b"exp_stream_"):
+        try:
+            stream_num = int(data.decode().split("_")[-1])
+            target_filter = None if event.is_private else str(event.chat_id)
+            csv_file, stream_meta = db.get_or_generate_csv_for_stream(stream_num, chat_id=target_filter)
+            if csv_file and os.path.exists(csv_file):
+                title = stream_meta.get("chat_title", "Stream") if stream_meta else f"Stream #{stream_num:02d}"
+                start_dt = stream_meta.get("start_time", "")[:10] if stream_meta else ""
+                await event.respond(
+                    f"📊 **Participation CSV Spreadsheet for Stream #{stream_num:02d}**\n**Chat**: {title}\n**Date**: {start_dt}",
+                    file=csv_file,
+                    parse_mode="markdown"
+                )
+                try:
+                    await event.answer(f"✅ Dispatched CSV for Stream #{stream_num:02d}!")
+                except Exception:
+                    pass
+            else:
+                try:
+                    await event.answer("⚠️ Could not generate CSV for this stream.", alert=True)
+                except Exception:
+                    pass
+        except Exception as ee:
+            print(f"[Export Callback Error] {ee}")
 
     elif data == b"menu_groups":
         msg = format_groups_list_message()
@@ -1084,6 +1176,20 @@ async def bot_command_handler(event):
     if not text:
         return
 
+    # If it's a private chat (DM) and user sends a stream number (e.g. "1", "5", "#3"), send that stream's CSV
+    if event.is_private and text.lstrip("#").isdigit():
+        stream_num = int(text.lstrip("#"))
+        csv_file, stream_meta = db.get_or_generate_csv_for_stream(stream_num)
+        if csv_file and os.path.exists(csv_file):
+            title = stream_meta.get("chat_title", "Stream") if stream_meta else f"Stream #{stream_num:02d}"
+            start_dt = stream_meta.get("start_time", "")[:10] if stream_meta else ""
+            await safe_reply(
+                event,
+                f"📊 **Participation CSV Spreadsheet for Stream #{stream_num:02d}**\n**Chat**: {title}\n**Date**: {start_dt}",
+                file=csv_file
+            )
+            return
+
     # If it's a private chat (DM) and user sends any text without a slash, reply with the menu
     if event.is_private and not (text.startswith("/") or text.startswith(".")):
         await safe_reply(event, get_help_menu(), buttons=build_main_menu_buttons(), parse_mode="markdown")
@@ -1217,12 +1323,34 @@ async def bot_command_handler(event):
 
     # 4. STREAM HISTORY COMMAND
     elif cmd in ["/history", "/paststreams", "/streams"]:
+        parts = text.split()
+        page = 1
+        if len(parts) > 1 and parts[1].isdigit():
+            page = int(parts[1])
         target_filter = None if event.is_private else str(event.chat_id)
-        msg = format_stream_history_message(chat_id=target_filter, limit=50)
-        await safe_reply(event, msg, parse_mode="markdown")
+        msg, btns = build_stream_history_page(page=page, page_size=10, chat_id=target_filter)
+        await safe_reply(event, msg, buttons=btns, parse_mode="markdown")
 
     # 5. EXPORT SPREADSHEET COMMAND
     elif cmd in ["/export", "/csv"]:
+        parts = text.split(maxsplit=1)
+        # Check if a specific stream number was requested (e.g. /export 3 or /csv #2)
+        if len(parts) > 1 and parts[1].strip().lstrip("#").isdigit():
+            stream_num = int(parts[1].strip().lstrip("#"))
+            target_filter = None if event.is_private else str(event.chat_id)
+            csv_file, stream_meta = db.get_or_generate_csv_for_stream(stream_num, chat_id=target_filter)
+            if csv_file and os.path.exists(csv_file):
+                title = stream_meta.get("chat_title", "Stream") if stream_meta else f"Stream #{stream_num:02d}"
+                start_dt = stream_meta.get("start_time", "")[:10] if stream_meta else ""
+                await safe_reply(
+                    event,
+                    f"📊 **Participation CSV Spreadsheet for Stream #{stream_num:02d}**\n**Chat**: {title}\n**Date**: {start_dt}",
+                    file=csv_file
+                )
+            else:
+                await safe_reply(event, f"⚠️ Stream session `#{stream_num}` was not found. Use `/history` to view all available stream numbers.", parse_mode="markdown")
+            return
+
         chat_id_str = str(event.chat_id)
         active_tracker = tracker_manager.get_tracker_for_chat(chat_id_str)
         
