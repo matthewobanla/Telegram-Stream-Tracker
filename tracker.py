@@ -623,12 +623,12 @@ def format_groups_list_message():
     msg += "\n_Use `/trackhere` in any group or `/addgroup @group` to add more._"
     return msg
 
-def format_stream_history_message(chat_id=None, limit=8):
+def format_stream_history_message(chat_id=None, limit=50):
     rows = db.get_stream_history(limit=limit, chat_id=chat_id)
     if not rows:
         return "⚠️ No past stream records found in database."
 
-    msg = f"📜 **Past Stream Sessions History** ({len(rows)} recent):\n\n"
+    msg = f"📜 **All Recorded Stream Sessions** ({len(rows)} total):\n\n"
     for idx, r in enumerate(rows, 1):
         title = r.get("chat_title", "Voice Stream")
         duration_m = (r.get("duration_sec", 0) or 0) / 60.0
@@ -637,7 +637,7 @@ def format_stream_history_message(chat_id=None, limit=8):
         if start_time:
             try:
                 dt = datetime.datetime.fromisoformat(start_time)
-                time_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+                time_str = dt.strftime("%b %d, %Y • %H:%M UTC")
             except Exception:
                 time_str = start_time[:16]
         else:
@@ -923,7 +923,7 @@ async def bot_callback_handler(event):
 
     elif data == b"menu_history":
         target_filter = None if event.is_private else str(event.chat_id)
-        msg = format_stream_history_message(chat_id=target_filter, limit=8)
+        msg = format_stream_history_message(chat_id=target_filter, limit=50)
         try:
             await event.edit(msg, buttons=build_back_button(b"menu_history"), parse_mode="markdown")
         except Exception:
@@ -1218,7 +1218,7 @@ async def bot_command_handler(event):
     # 4. STREAM HISTORY COMMAND
     elif cmd in ["/history", "/paststreams", "/streams"]:
         target_filter = None if event.is_private else str(event.chat_id)
-        msg = format_stream_history_message(chat_id=target_filter, limit=10)
+        msg = format_stream_history_message(chat_id=target_filter, limit=50)
         await safe_reply(event, msg, parse_mode="markdown")
 
     # 5. EXPORT SPREADSHEET COMMAND

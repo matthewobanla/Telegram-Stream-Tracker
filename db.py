@@ -1,6 +1,8 @@
 import sqlite3
 import datetime
 import os
+import csv
+import re
 
 DB_PATH = os.getenv("DB_PATH", "tracker.db")
 
@@ -133,6 +135,11 @@ def init_db():
         c.execute("SELECT COUNT(*) FROM streams")
         if c.fetchone()[0] == 0:
             seed_initial_stream(c)
+
+    try:
+        sync_all_csv_reports_to_db()
+    except Exception:
+        pass
 
 def get_tracked_groups():
     with get_connection() as conn:
@@ -361,18 +368,104 @@ def get_latest_stream(chat_id=None):
         participants = c.fetchall()
         return dict(stream), [dict(p) for p in participants]
 
-def get_stream_history(limit=5, chat_id=None):
+def sync_all_csv_reports_to_db(reports_dir="reports"):
+    """Scans reports folder and imports all historical CSV reports into tracker.db."""
+    if not os.path.exists(reports_dir):
+        return
     with get_connection() as conn:
         c = conn.cursor()
+        for fname in os.listdir(reports_dir):
+            if not fname.endswith(".csv") or fname.startswith("."):
+                continue
+            filepath = os.path.join(reports_dir, fname)
+            clean_name = os.path.splitext(fname)[0]
+            stream_id = f"stream_{clean_name}"
+            
+            c.execute("SELECT COUNT(*) FROM streams WHERE stream_id = ? OR csv_path = ?", (stream_id, filepath))
+            if c.fetchone()[0] > 0:
+                continue
+            
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    reader = list(csv.DictReader(f))
+                    if not reader:
+                        continue
+                    
+                    total_participants = len(reader)
+                    max_dur_min = 0.0
+                    for row in reader:
+                        try:
+                            d = float(row.get("Total Duration (Minutes)", 0) or 0)
+                            if d > max_dur_min:
+                                max_dur_min = d
+                        except Exception:
+                            pass
+                    
+                    match = re.search(r"(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", fname)
+                    if match:
+                        y, m, d, hh, mm, ss = match.groups()
+                        start_time_iso = f"{y}-{m}-{d}T{hh}:{mm}:{ss}"
+                    else:
+                        mtime = os.path.getmtime(filepath)
+                        start_time_iso = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+                    
+                    duration_sec = max_dur_min * 60.0 if max_dur_min > 0 else 60.0
+                    chat_title = "CHURCH IS HERE |||| KINGS' HUB BC"
+                    
+                    c.execute("""
+                    INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, start_time, end_time, duration_sec, total_participants, csv_path, is_active)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """, (stream_id, stream_id, chat_title, start_time_iso, start_time_iso, duration_sec, total_participants, filepath))
+                    
+                    for row in reader:
+                        try:
+                            uid = int(row.get("User ID", 0) or 0)
+                            if not uid:
+                                continue
+                            name = row.get("Name", "")
+                            uname = row.get("Username", "")
+                            fjoin = row.get("First Join (UTC)", "")
+                            lleave = row.get("Last Leave (UTC)", "")
+                            scount = int(row.get("Session Count", 1) or 1)
+                            tmin = float(row.get("Total Duration (Minutes)", 0) or 0)
+                            pct = float(row.get("Participation (%)", 0) or 0)
+                            
+                            c.execute("""
+                            INSERT OR REPLACE INTO participants (stream_id, user_id, name, username, first_join, last_leave, session_count, total_sec, total_min, pct, is_online)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                            """, (stream_id, uid, name, uname, fjoin, lleave, scount, tmin * 60.0, tmin, pct))
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[DB Sync CSV Notice] Failed to sync {fname}: {e}")
+
+def get_stream_history(limit=50, chat_id=None):
+    try:
+        sync_all_csv_reports_to_db()
+    except Exception:
+        pass
+
+    with get_connection() as conn:
+        c = conn.cursor()
+        rows = []
         if chat_id is not None and str(chat_id).strip():
             cid_str = str(chat_id).strip()
             clean_id = cid_str.replace("-100", "").replace("-", "")
             c.execute("""
             SELECT * FROM streams 
-            WHERE is_active = 0 AND (chat_id = ? OR chat_id LIKE ? OR chat_title LIKE ?)
-            ORDER BY rowid DESC LIMIT ?
+            WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0)
+              AND (chat_id = ? OR chat_id LIKE ? OR chat_title LIKE ?)
+            ORDER BY start_time DESC, rowid DESC LIMIT ?
             """, (cid_str, f"%{clean_id}%", f"%{cid_str}%", limit))
-        else:
-            c.execute("SELECT * FROM streams WHERE is_active = 0 ORDER BY rowid DESC LIMIT ?", (limit,))
-        rows = c.fetchall()
-        return [dict(r) for r in rows]
+            rows = [dict(r) for r in c.fetchall()]
+
+        # Fallback to all streams if specific chat filter has only 1 or 0 records
+        if len(rows) <= 1:
+            c.execute("""
+            SELECT * FROM streams 
+            WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0)
+            ORDER BY start_time DESC, rowid DESC LIMIT ?
+            """, (limit,))
+            rows = [dict(r) for r in c.fetchall()]
+
+        return rows
