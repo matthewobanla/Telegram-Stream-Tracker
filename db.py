@@ -43,9 +43,9 @@ SEED_PARTICIPANTS = [
 
 def seed_initial_stream(cursor):
     cursor.execute("""
-    INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, start_time, end_time, duration_sec, total_participants, csv_path, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-    """, (SEED_STREAM_ID, "-5734923756965228090", "CHURCH IS HERE |||| KINGS' HUB BC", "2026-08-14T20:12:00", "2026-08-14T20:20:00", 480.0, 29, "reports/livestream_attendance_report.csv"))
+    INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, chat_id, start_time, end_time, duration_sec, total_participants, csv_path, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    """, (SEED_STREAM_ID, "-5734923756965228090", "CHURCH IS HERE |||| KINGS' HUB BC", "1335265990", "2026-08-14T20:12:00", "2026-08-14T20:20:00", 480.0, 29, "reports/livestream_attendance_report.csv"))
 
     for uid, name, uname, fjoin, lleave, scount, tsec, tmin, pct in SEED_PARTICIPANTS:
         cursor.execute("""
@@ -134,9 +134,28 @@ def init_db():
         except Exception:
             pass
 
+        # Ensure seed stream exists if database is empty
         c.execute("SELECT COUNT(*) FROM streams")
         if c.fetchone()[0] == 0:
             seed_initial_stream(c)
+
+        # Backfill and normalize legacy/existing stream records
+        try:
+            c.execute("""
+            UPDATE streams 
+            SET chat_id = '1335265990' 
+            WHERE (chat_id IS NULL OR chat_id = '' OR chat_id = 'None') 
+              AND (chat_title LIKE '%KINGS%' OR chat_title LIKE '%CHURCH%')
+            """)
+            c.execute("""
+            UPDATE streams 
+            SET chat_id = '4399983308', chat_title = 'FGC 71st Convention Volunteers Group' 
+            WHERE chat_title LIKE '%FGC%' OR chat_title LIKE '%Convention%'
+            """)
+            c.execute("DELETE FROM streams WHERE stream_id = 'stream_livestream_attendance_report'")
+            c.execute("DELETE FROM participants WHERE stream_id = 'stream_livestream_attendance_report'")
+        except Exception:
+            pass
 
     try:
         sync_all_csv_reports_to_db()
@@ -435,7 +454,7 @@ def sync_all_csv_reports_to_db(reports_dir="reports"):
     with get_connection() as conn:
         c = conn.cursor()
         for fname in sorted(os.listdir(reports_dir)):
-            if not fname.endswith(".csv") or fname.startswith(".") or fname in ("report_latest.csv", "today_report.csv"):
+            if not fname.endswith(".csv") or fname.startswith(".") or fname in ("report_latest.csv", "today_report.csv", "livestream_attendance_report.csv"):
                 continue
             filepath = os.path.join(reports_dir, fname)
             
@@ -602,10 +621,10 @@ def get_distinct_stream_groups():
     with get_connection() as conn:
         c = conn.cursor()
         c.execute("""
-        SELECT chat_title, COALESCE(chat_id, '') as chat_id, COUNT(*) as stream_count 
+        SELECT chat_title, MAX(COALESCE(chat_id, '')) as chat_id, COUNT(*) as stream_count 
         FROM streams 
         WHERE (total_participants > 0 OR duration_sec > 0 OR is_active = 0)
-        GROUP BY chat_title, chat_id
+        GROUP BY chat_title
         ORDER BY MAX(start_time) DESC
         """)
         return [dict(r) for r in c.fetchall()]
