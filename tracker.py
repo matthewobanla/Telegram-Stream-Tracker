@@ -601,24 +601,48 @@ def format_admin_list_message():
 def format_groups_list_message():
     tracked_db = db.get_tracked_groups()
     
-    # Merge with in-memory tracked_entities
+    # Merge with in-memory tracked_entities with robust deduplication
     groups_dict = {}
+    
+    def normalize_key(val):
+        s = str(val or "").strip()
+        if s.startswith("-100") and len(s) > 4:
+            return s[4:]
+        if s.startswith("-") and len(s) > 1:
+            return s[1:]
+        return s.lower()
+
     for g in tracked_db:
-        key = str(g.get("entity_id") or g.get("target")).strip()
-        if key:
+        target = g.get("target", "").strip()
+        eid = str(g.get("entity_id", "")).strip()
+        key = normalize_key(eid or target)
+        if key and key not in groups_dict:
             groups_dict[key] = {
-                "title": g.get("title") or g.get("target"),
-                "target": g.get("target"),
-                "entity_id": str(g.get("entity_id", ""))
+                "title": g.get("title") or target,
+                "target": target,
+                "entity_id": eid
             }
             
     for eid, info in tracked_entities.items():
-        if eid not in groups_dict and info.get("target") not in groups_dict:
-            groups_dict[eid] = {
+        norm_eid = normalize_key(eid)
+        norm_target = normalize_key(info.get("target"))
+        matched_key = None
+        for k in [norm_eid, norm_target]:
+            if k in groups_dict:
+                matched_key = k
+                break
+        if not matched_key:
+            groups_dict[norm_eid or norm_target] = {
                 "title": info.get("title", eid),
                 "target": info.get("target", eid),
                 "entity_id": str(eid)
             }
+        else:
+            # Update title if memory has a better title
+            if info.get("title") and info["title"] != eid:
+                groups_dict[matched_key]["title"] = info["title"]
+            if info.get("target"):
+                groups_dict[matched_key]["target"] = info["target"]
 
     if not groups_dict:
         return "⚠️ No groups are currently being tracked.\nUse `/trackhere` in a group or `/addgroup @username` to add one."
