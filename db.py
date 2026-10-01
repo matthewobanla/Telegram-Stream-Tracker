@@ -471,16 +471,20 @@ def sync_all_csv_reports_to_db(reports_dir="reports"):
                         except Exception:
                             pass
                     
+                    duration_sec = max_dur_min * 60.0 if max_dur_min > 0 else 60.0
+
                     title_match = re.search(r"report_\d{8}_\d{6}_(.+)\.csv", fname)
                     if title_match:
                         chat_title = title_match.group(1).replace("_", " ").strip()
                     else:
                         chat_title = "CHURCH IS HERE |||| KINGS' HUB BC"
                     
+                    chat_id = "4399983308" if "FGC" in chat_title else "1335265990"
+                    
                     c.execute("""
-                    INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, start_time, end_time, duration_sec, total_participants, csv_path, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    """, (stream_id, stream_id, chat_title, start_time_iso, start_time_iso, duration_sec, total_participants, filepath))
+                    INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, chat_id, start_time, end_time, duration_sec, total_participants, csv_path, is_active)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """, (stream_id, stream_id, chat_title, chat_id, start_time_iso, start_time_iso, duration_sec, total_participants, filepath))
                     
                     for row in reader:
                         try:
