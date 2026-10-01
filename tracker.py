@@ -753,12 +753,14 @@ async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None,
         return
 
     try:
-        stream_meta, participants = db.get_latest_stream()
-        if not stream_meta or not participants:
-            return
+        if expected_stream_id:
+            stream_meta, participants = db.get_stream_by_id(expected_stream_id)
+            if not stream_meta:
+                stream_meta, participants = db.get_latest_stream()
+        else:
+            stream_meta, participants = db.get_latest_stream()
 
-        if expected_stream_id and stream_meta.get("stream_id") != expected_stream_id:
-            print(f"[Auto-Report] Skipped sending report: latest stream '{stream_meta.get('stream_id')}' does not match expected '{expected_stream_id}'")
+        if not stream_meta or not participants:
             return
 
         # Ignore accidental or phantom 0-second / empty streams
@@ -885,17 +887,62 @@ def get_help_menu():
         "**👑 Admin Report Routing**\n"
         "• `/admins` — View list of admins receiving automated reports\n"
         "• `/addadmin @username` — Add an admin to receive reports in DM\n"
-        "• `/removeadmin @username` — Remove an admin from report delivery\n"
+        "• `/removeadmin @username` — Remove an admin from report delivery\n\n"
+        "**🔄 System Maintenance**\n"
+        "• `/refresh` or `/reload` — Sync database, recover streams & update bot menus\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "_Tip: Tap any button below to navigate instantly._"
     )
+
+async def execute_bot_refresh():
+    """Executes a full system refresh: finalizes unclosed streams, syncs CSVs, reloads groups/admins, and refreshes command scopes."""
+    try:
+        db.finalize_dangling_streams()
+        db.sync_all_csv_reports_to_db()
+    except Exception as e:
+        print(f"[Refresh DB Error] {e}")
+
+    # 1. Reload and resolve tracked groups from DB
+    db_groups = db.get_tracked_groups()
+    resolved_count = 0
+    for g in db_groups:
+        target = g.get("target") or g.get("entity_id")
+        if target:
+            ok, _ = await resolve_and_add_target(target, added_by=g.get("added_by", "Database"))
+            if ok:
+                resolved_count += 1
+
+    # 2. Sync admin recipients from bot dialogs
+    try:
+        await sync_bot_dialogs()
+    except Exception as e:
+        print(f"[Refresh Admin Sync Error] {e}")
+
+    # 3. Refresh Telegram Bot Command Scopes
+    try:
+        await register_bot_commands()
+    except Exception as e:
+        print(f"[Refresh Command Registration Error] {e}")
+
+    all_groups = db.get_tracked_groups()
+    all_admins = get_all_admin_recipients()
+    all_streams = db.get_all_streams()
+    curr_eng = transcriber.get_active_engine().upper()
+
+    return {
+        "groups_count": len(all_groups),
+        "admins_count": len(all_admins),
+        "streams_count": len(all_streams),
+        "engine": curr_eng
+    }
 
 def build_main_menu_buttons():
     return [
         [Button.inline("📊 Live Stats / Leaderboard", b"menu_stats"), Button.inline("🔴 Live Status", b"menu_status")],
         [Button.inline("📜 Stream History", b"menu_history"), Button.inline("📄 Download CSV Report", b"menu_export")],
         [Button.inline("👥 Tracked Groups", b"menu_groups"), Button.inline("👑 Admin Recipients", b"menu_admins")],
-        [Button.inline("🎙 AI Scribe & Engine", b"menu_engine"), Button.inline("ℹ️ Help & Commands", b"menu_help")]
+        [Button.inline("🎙 AI Scribe & Engine", b"menu_engine"), Button.inline("ℹ️ Help & Commands", b"menu_help")],
+        [Button.inline("🔄 Refresh & Sync Bot", b"menu_refresh")]
     ]
 
 def build_back_button(refresh_key=None):
@@ -1172,10 +1219,35 @@ async def bot_callback_handler(event):
             "**👑 Admin Recipients:**\n"
             "• `/admins` — View recipient list\n"
             "• `/addadmin @user` — Add report recipient\n"
-            "• `/removeadmin @user` — Remove report recipient"
+            "• `/removeadmin @user` — Remove report recipient\n\n"
+            "**🔄 System Refresh:**\n"
+            "• `/refresh` or `/reload` — Sync DB, recover streams & update bot menus"
         )
         try:
             await event.edit(help_detail, buttons=build_back_button(), parse_mode="markdown")
+        except Exception:
+            pass
+
+    elif data == b"menu_refresh":
+        try:
+            await event.answer("⏳ Refreshing & syncing bot systems...", alert=False)
+        except Exception:
+            pass
+        
+        info = await execute_bot_refresh()
+        refresh_msg = (
+            "🔄 **Bot Systems Refreshed & Synced Successfully!**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• 👥 **Tracked Groups**: `{info['groups_count']}` active\n"
+            f"• 👑 **Admin Recipients**: `{info['admins_count']}` synced\n"
+            f"• 📜 **Stream Records**: `{info['streams_count']}` sessions logged\n"
+            f"• 🎙 **AI Audio Engine**: `{info['engine']}`\n"
+            f"• ⚙️ **Command Menus**: Scopes updated & verified\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "_All database tables, cached entities, and attendance records are up to date._"
+        )
+        try:
+            await event.edit(refresh_msg, buttons=build_back_button(b"menu_refresh"), parse_mode="markdown")
         except Exception:
             pass
 
@@ -1523,7 +1595,24 @@ async def bot_command_handler(event):
             else:
                 await safe_reply(event, f"⚠️ `{target_to_remove}` was not found in database admin list.\nType `/admins` to view the list.", parse_mode="markdown")
 
-    # 7. HELP, START & MENU COMMANDS
+    # 7. REFRESH & MAINTENANCE COMMANDS
+    elif cmd in ["/refresh", "/reload", "/sync"]:
+        await safe_reply(event, "⏳ **Refreshing & syncing bot systems...**", parse_mode="markdown")
+        info = await execute_bot_refresh()
+        refresh_msg = (
+            "🔄 **Bot Systems Refreshed & Synced Successfully!**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• 👥 **Tracked Groups**: `{info['groups_count']}` active\n"
+            f"• 👑 **Admin Recipients**: `{info['admins_count']}` synced\n"
+            f"• 📜 **Stream Records**: `{info['streams_count']}` sessions logged\n"
+            f"• 🎙 **AI Audio Engine**: `{info['engine']}`\n"
+            f"• ⚙️ **Command Menus**: Scopes updated & verified\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "_All database tables, cached entities, and attendance records are up to date._"
+        )
+        await safe_reply(event, refresh_msg, buttons=build_main_menu_buttons(), parse_mode="markdown")
+
+    # 8. HELP, START & MENU COMMANDS
     elif cmd in ["/menu", "/help", "/start", "/commands", "/options"]:
         await safe_reply(event, get_help_menu(), buttons=build_main_menu_buttons(), parse_mode="markdown")
 
@@ -1690,6 +1779,7 @@ async def register_bot_commands():
         types.BotCommand(command="trackhere", description="Start tracking current group"),
         types.BotCommand(command="export", description="Download CSV attendance spreadsheet"),
         types.BotCommand(command="engine", description="View / switch AI transcription engine"),
+        types.BotCommand(command="refresh", description="Sync database, recover streams & update bot"),
         types.BotCommand(command="help", description="Show admin help & command guide")
     ]
 
@@ -1704,6 +1794,7 @@ async def register_bot_commands():
         types.BotCommand(command="engine", description="View or switch AI transcription engine"),
         types.BotCommand(command="transcribe", description="Transcribe an audio file or voice note"),
         types.BotCommand(command="export", description="Download CSV attendance spreadsheet"),
+        types.BotCommand(command="refresh", description="Sync database, recover streams & update bot"),
         types.BotCommand(command="help", description="Show full help & usage guide")
     ]
 

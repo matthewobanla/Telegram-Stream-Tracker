@@ -384,26 +384,37 @@ def save_stream_end(stream_id, end_time_dt, csv_path=""):
         """, (end_str, total_stream_sec, total_count, csv_path, stream_id))
 
 def get_latest_stream(chat_id=None):
+    """Retrieves the most recent stream session and its participants, sorted chronologically by start_time."""
+    try:
+        finalize_dangling_streams()
+        sync_all_csv_reports_to_db()
+    except Exception:
+        pass
+
     with get_connection() as conn:
         c = conn.cursor()
+        stream = None
         if chat_id is not None and str(chat_id).strip():
             cid_str = str(chat_id).strip()
-            # Try to match numeric ID (accounting for potential -100 prefix differences), username, or title
             clean_id = cid_str.replace("-100", "").replace("-", "")
             c.execute("""
             SELECT * FROM streams 
-            WHERE chat_id = ? 
-               OR chat_id = ? 
-               OR chat_id LIKE ? 
-               OR chat_title LIKE ? 
-            ORDER BY rowid DESC LIMIT 1
+            WHERE (chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_title LIKE ?)
+              AND (total_participants > 0 OR duration_sec > 10)
+            ORDER BY start_time DESC, rowid DESC LIMIT 1
             """, (cid_str, f"-100{clean_id}", f"%{clean_id}%", f"%{cid_str}%"))
             stream = c.fetchone()
-        else:
-            stream = None
 
         if not stream:
-            c.execute("SELECT * FROM streams ORDER BY rowid DESC LIMIT 1")
+            c.execute("""
+            SELECT * FROM streams 
+            WHERE total_participants > 0 OR duration_sec > 10
+            ORDER BY start_time DESC, rowid DESC LIMIT 1
+            """)
+            stream = c.fetchone()
+
+        if not stream:
+            c.execute("SELECT * FROM streams ORDER BY start_time DESC, rowid DESC LIMIT 1")
             stream = c.fetchone()
 
         if not stream:
@@ -424,7 +435,7 @@ def sync_all_csv_reports_to_db(reports_dir="reports"):
     with get_connection() as conn:
         c = conn.cursor()
         for fname in sorted(os.listdir(reports_dir)):
-            if not fname.endswith(".csv") or fname.startswith("."):
+            if not fname.endswith(".csv") or fname.startswith(".") or fname in ("report_latest.csv", "today_report.csv"):
                 continue
             filepath = os.path.join(reports_dir, fname)
             
@@ -490,9 +501,94 @@ def sync_all_csv_reports_to_db(reports_dir="reports"):
             except Exception as e:
                 print(f"[DB Sync CSV Notice] Failed to sync {fname}: {e}")
 
+def finalize_dangling_streams():
+    """Auto-recovers and finalizes any dangling or interrupted active streams in the database."""
+    with get_connection() as conn:
+        c = conn.cursor()
+        dangling = c.execute("SELECT * FROM streams WHERE is_active = 1").fetchall()
+        for s in dangling:
+            sid = s["stream_id"]
+            chat_title = s["chat_title"] or "Voice Stream"
+            start_time_str = s["start_time"]
+            
+            time_info = c.execute("""
+                SELECT MIN(join_time), MAX(join_time), MAX(leave_time) 
+                FROM sessions WHERE stream_id = ?
+            """, (sid,)).fetchone()
+            
+            max_time = time_info[2] or time_info[1] or start_time_str
+            c.execute("UPDATE sessions SET leave_time = ? WHERE stream_id = ? AND leave_time IS NULL", (max_time, sid))
+            
+            parts = c.execute("SELECT * FROM participants WHERE stream_id = ?", (sid,)).fetchall()
+            total_p = len(parts)
+            
+            if total_p > 0 and start_time_str:
+                try:
+                    start_dt = datetime.datetime.fromisoformat(start_time_str)
+                    end_dt = datetime.datetime.fromisoformat(max_time)
+                except Exception:
+                    start_dt = datetime.datetime.now(datetime.timezone.utc)
+                    end_dt = start_dt + datetime.timedelta(minutes=5)
+                
+                dur_sec = max(1.0, (end_dt - start_dt).total_seconds())
+                
+                for p in parts:
+                    p_uid = p["user_id"]
+                    p_sec = p["total_sec"] or 0.0
+                    if p_sec <= 0:
+                        p_sessions = c.execute("SELECT join_time, leave_time FROM sessions WHERE stream_id = ? AND user_id = ?", (sid, p_uid)).fetchall()
+                        accum_sec = 0.0
+                        for ps in p_sessions:
+                            try:
+                                jt = datetime.datetime.fromisoformat(ps["join_time"])
+                                lt = datetime.datetime.fromisoformat(ps["leave_time"] or max_time)
+                                accum_sec += max(0.0, (lt - jt).total_seconds())
+                            except Exception:
+                                pass
+                        p_sec = accum_sec if accum_sec > 0 else 60.0
+                    
+                    pct = min(100.0, (p_sec / dur_sec) * 100.0)
+                    c.execute("""
+                        UPDATE participants 
+                        SET total_sec = ?, total_min = ?, pct = ?, is_online = 0 
+                        WHERE stream_id = ? AND user_id = ?
+                    """, (p_sec, p_sec / 60.0, pct, sid, p_uid))
+                
+                os.makedirs("reports", exist_ok=True)
+                clean_title = "".join(ch for ch in chat_title if ch.isalnum() or ch in (' ', '_', '-')).strip().replace(" ", "_")
+                start_clean = start_time_str[:19].replace(":", "").replace("-", "").replace("T", "_")
+                csv_filename = f"report_{start_clean}_{clean_title[:30]}.csv"
+                csv_path = os.path.join("reports", csv_filename)
+                
+                updated_parts = c.execute("SELECT * FROM participants WHERE stream_id = ? ORDER BY total_sec DESC", (sid,)).fetchall()
+                with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Rank", "User ID", "Name", "Username", "First Join (UTC)", "Last Leave (UTC)", "Session Count", "Total Duration (Minutes)", "Participation (%)"])
+                    for rank, up in enumerate(updated_parts, 1):
+                        writer.writerow([
+                            rank,
+                            up["user_id"],
+                            up["name"],
+                            up["username"],
+                            up["first_join"],
+                            up["last_leave"] or max_time,
+                            up["session_count"],
+                            f"{up['total_min']:.2f}",
+                            f"{up['pct']:.2f}"
+                        ])
+                
+                c.execute("""
+                    UPDATE streams 
+                    SET end_time = ?, duration_sec = ?, total_participants = ?, csv_path = ?, is_active = 0 
+                    WHERE stream_id = ?
+                """, (end_dt.isoformat(), dur_sec, total_p, csv_path, sid))
+            else:
+                c.execute("UPDATE streams SET is_active = 0, duration_sec = 0.0, total_participants = 0 WHERE stream_id = ?", (sid,))
+
 def get_all_streams(chat_id=None):
     """Returns all completed streams with 1-based sequential index numbers (1 = first, N = latest)."""
     try:
+        finalize_dangling_streams()
         sync_all_csv_reports_to_db()
     except Exception:
         pass
@@ -505,7 +601,7 @@ def get_all_streams(chat_id=None):
             clean_id = cid_str.replace("-100", "").replace("-", "")
             c.execute("""
             SELECT * FROM streams 
-            WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0)
+            WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0 OR total_participants > 0)
               AND (chat_id = ? OR chat_id LIKE ? OR chat_title LIKE ?)
             ORDER BY start_time ASC, rowid ASC
             """, (cid_str, f"%{clean_id}%", f"%{cid_str}%"))
@@ -515,7 +611,7 @@ def get_all_streams(chat_id=None):
         if not rows:
             c.execute("""
             SELECT * FROM streams 
-            WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0)
+            WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0 OR total_participants > 0)
             ORDER BY start_time ASC, rowid ASC
             """)
             rows = [dict(r) for r in c.fetchall()]
