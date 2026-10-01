@@ -653,30 +653,44 @@ def format_groups_list_message():
 def build_history_group_selector():
     """Builds an interactive selection menu allowing user to choose which group's history to browse."""
     groups = db.get_distinct_stream_groups()
-    total_all = sum(g["stream_count"] for g in groups)
+    total_all = sum(g.get("stream_count", 0) for g in groups)
 
-    msg = "📜 **Stream History — Select Target Group**\n\n"
-    msg += f"Found `{len(groups)}` group(s) with `{total_all}` recorded session(s).\n"
-    msg += "Choose a specific group to view its past stream records, or browse all recorded sessions:\n"
+    msg = "📜 **Stream Attendance History — Select Group**\n\n"
+    msg += f"Found **{len(groups)}** group(s) with **{total_all}** recorded stream session(s).\n\n"
+    msg += "Tap a group below to view its specific past records, or choose **All Groups** to browse all sessions:\n"
 
     buttons = []
     # 1. Option for All Groups
-    buttons.append([Button.inline(f"🌐 All Groups ({total_all} total streams)", b"hist_grp_all_p_1")])
+    buttons.append([Button.inline(f"🌐 All Groups ({total_all} total streams)", b"hist_sel_all_p_1")])
 
     # 2. Options for each distinct group
-    for g in groups:
-        title = g["chat_title"] or "Group Stream"
-        count = g["stream_count"]
-        cid = g["chat_id"] or title[:20]
-        clean_key = str(cid).replace("-100", "").replace("-", "")[:24]
-        btn_text = f"📁 {title[:26]} ({count})"
-        buttons.append([Button.inline(btn_text, f"hist_grp_{clean_key}_p_1".encode())])
+    for idx, g in enumerate(groups):
+        title = g.get("chat_title") or f"Group #{idx+1}"
+        count = g.get("stream_count", 0)
+        btn_text = f"📁 {title[:28]} ({count} stream{'s' if count != 1 else ''})"
+        buttons.append([Button.inline(btn_text, f"hist_sel_{idx}_p_1".encode())])
 
     buttons.append([Button.inline("« Back to Menu", b"menu_main")])
     return msg, buttons
 
-def build_stream_history_page(page=1, page_size=10, chat_id=None):
+def build_stream_history_page(page=1, page_size=10, chat_id=None, group_idx=None):
     """Builds a paginated 10-item stream history view with direct CSV export buttons and group filtering."""
+    groups = db.get_distinct_stream_groups()
+    
+    # Resolve filter from group_idx if provided
+    current_idx_str = "all"
+    if group_idx is not None and str(group_idx).isdigit() and int(group_idx) < len(groups):
+        current_idx_str = str(group_idx)
+        selected_grp = groups[int(group_idx)]
+        chat_id = selected_grp.get("chat_id") or selected_grp.get("chat_title")
+    elif chat_id and str(chat_id).lower() != "all":
+        for i, g in enumerate(groups):
+            clean_cid = str(g.get("chat_id", "")).replace("-100", "").replace("-", "")
+            clean_tgt = str(chat_id).replace("-100", "").replace("-", "")
+            if (clean_cid and clean_cid == clean_tgt) or (clean_tgt.lower() in g.get("chat_title", "").lower()):
+                current_idx_str = str(i)
+                break
+
     all_streams = db.get_all_streams(chat_id=chat_id)
     filter_label = ""
     if chat_id and str(chat_id).lower() != "all":
@@ -687,7 +701,7 @@ def build_stream_history_page(page=1, page_size=10, chat_id=None):
     if not all_streams:
         msg = f"⚠️ No past stream records found in database{filter_label}."
         btns = [
-            [Button.inline("📂 Choose Another Group", b"hist_sel")],
+            [Button.inline("📂 Choose Another Group", b"hist_menu_sel")],
             [Button.inline("« Back to Menu", b"menu_main")]
         ]
         return msg, btns
@@ -701,8 +715,6 @@ def build_stream_history_page(page=1, page_size=10, chat_id=None):
     start_idx = (page - 1) * page_size
     end_idx = min(start_idx + page_size, total_items)
     page_items = reversed_streams[start_idx:end_idx]
-
-    cid_key = str(chat_id).replace("-100", "").replace("-", "")[:24] if (chat_id and str(chat_id).lower() != "all") else "all"
 
     msg = f"📜 **Recorded Stream Sessions History{filter_label}**\n"
     msg += f"_Showing {start_idx + 1}–{end_idx} of {total_items} total recorded streams (Page {page}/{total_pages}):_\n\n"
@@ -744,20 +756,20 @@ def build_stream_history_page(page=1, page_size=10, chat_id=None):
     # 2. Pagination controls row
     nav_row = []
     if page > 1:
-        nav_row.append(Button.inline("⬅️ Prev", f"hist_grp_{cid_key}_p_{page-1}".encode()))
+        nav_row.append(Button.inline("⬅️ Prev", f"hist_sel_{current_idx_str}_p_{page-1}".encode()))
     else:
         nav_row.append(Button.inline("⏹ First", b"hist_noop"))
 
-    nav_row.append(Button.inline(f"📄 {page}/{total_pages}", f"hist_grp_{cid_key}_p_{page}".encode()))
+    nav_row.append(Button.inline(f"📄 {page}/{total_pages}", f"hist_sel_{current_idx_str}_p_{page}".encode()))
 
     if page < total_pages:
-        nav_row.append(Button.inline("Next ➡️", f"hist_grp_{cid_key}_p_{page+1}".encode()))
+        nav_row.append(Button.inline("Next ➡️", f"hist_sel_{current_idx_str}_p_{page+1}".encode()))
     else:
         nav_row.append(Button.inline("⏹ Last", b"hist_noop"))
 
     buttons.append(nav_row)
     # 3. Filter by group and Back button
-    buttons.append([Button.inline("📂 Filter by Group", b"hist_sel"), Button.inline("« Back to Menu", b"menu_main")])
+    buttons.append([Button.inline("📂 Choose Group", b"hist_menu_sel"), Button.inline("« Back to Menu", b"menu_main")])
 
     return msg, buttons
 
@@ -1106,9 +1118,9 @@ async def bot_callback_handler(event):
         except Exception:
             pass
 
-    elif data in (b"menu_history", b"hist_sel"):
+    elif data in (b"menu_history", b"hist_menu_sel", b"hist_sel"):
         groups = db.get_distinct_stream_groups()
-        if len(groups) > 1 and event.is_private:
+        if len(groups) > 1:
             msg, btns = build_history_group_selector()
         else:
             target_filter = None if event.is_private else str(event.chat_id)
@@ -1118,16 +1130,15 @@ async def bot_callback_handler(event):
         except Exception:
             pass
 
-    elif data.startswith(b"hist_grp_"):
+    elif data.startswith(b"hist_sel_"):
         try:
             parts = data.decode().split("_")
-            cid_key = parts[2]
+            idx_str = parts[2]
             page_num = int(parts[4])
-            target_filter = None if cid_key == "all" else cid_key
-            msg, btns = build_stream_history_page(page=page_num, page_size=10, chat_id=target_filter)
+            msg, btns = build_stream_history_page(page=page_num, page_size=10, group_idx=None if idx_str == "all" else int(idx_str))
             await event.edit(msg, buttons=btns, parse_mode="markdown")
         except Exception as e:
-            print(f"[History Group Paging Notice] {e}")
+            print(f"[History Group Selection Callback Notice] {e}")
 
     elif data == b"hist_noop":
         try:
