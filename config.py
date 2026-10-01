@@ -36,6 +36,17 @@ MIN_ATTENDANCE_SECONDS = int(os.getenv("MIN_ATTENDANCE_SECONDS", 30))
 # Whether to completely exclude brief previewers (< MIN_ATTENDANCE_SECONDS) from CSV exports (Default: False)
 EXCLUDE_PREVIEWS_FROM_CSV = os.getenv("EXCLUDE_PREVIEWS_FROM_CSV", "False").lower() in ("true", "1", "yes")
 
-# Reports directory on disk
+# Storage & Cloud Persistence (Railway Volume / DATA_DIR support)
+DATA_DIR = os.getenv("DATA_DIR", "").strip()
+if DATA_DIR:
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+    DB_PATH = os.getenv("DB_PATH", os.path.join(DATA_DIR, "tracker.db"))
+    CSV_OUTPUT_DIR = os.getenv("CSV_OUTPUT_DIR", os.path.join(DATA_DIR, "reports"))
+else:
+    DB_PATH = os.getenv("DB_PATH", "tracker.db")
+    CSV_OUTPUT_DIR = os.getenv("CSV_OUTPUT_DIR", "reports")
+
 EXPORT_CSV = True
-CSV_OUTPUT_DIR = os.getenv("CSV_OUTPUT_DIR", "reports")

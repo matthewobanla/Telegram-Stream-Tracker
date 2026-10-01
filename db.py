@@ -4,9 +4,21 @@ import os
 import csv
 import re
 import json
+import shutil
 
-DB_PATH = os.getenv("DB_PATH", "tracker.db")
-ADMINS_JSON_FILE = os.getenv("ADMINS_JSON_FILE", "admins.json")
+DATA_DIR = os.getenv("DATA_DIR", "").strip()
+if DATA_DIR:
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+    DB_PATH = os.getenv("DB_PATH", os.path.join(DATA_DIR, "tracker.db"))
+    REPORTS_DIR = os.getenv("CSV_OUTPUT_DIR", os.path.join(DATA_DIR, "reports"))
+    ADMINS_JSON_FILE = os.getenv("ADMINS_JSON_FILE", os.path.join(DATA_DIR, "admins.json"))
+else:
+    DB_PATH = os.getenv("DB_PATH", "tracker.db")
+    REPORTS_DIR = os.getenv("CSV_OUTPUT_DIR", "reports")
+    ADMINS_JSON_FILE = os.getenv("ADMINS_JSON_FILE", "admins.json")
 
 SEED_STREAM_ID = "stream_20260814_201200_-5734923756965228090"
 SEED_PARTICIPANTS = [
@@ -447,32 +459,54 @@ def get_latest_stream(chat_id=None):
         participants = c.fetchall()
         return dict(stream), [dict(p) for p in participants]
 
-def sync_all_csv_reports_to_db(reports_dir="reports"):
-    """Scans reports folder and imports all historical CSV reports into tracker.db."""
-    if not os.path.exists(reports_dir):
-        return
+def sync_all_csv_reports_to_db(reports_dir=None):
+    """Scans reports folders and imports all historical CSV reports into tracker.db."""
+    source_dirs = []
+    if reports_dir:
+        source_dirs.append(reports_dir)
+    else:
+        if REPORTS_DIR and os.path.exists(REPORTS_DIR) and REPORTS_DIR not in source_dirs:
+            source_dirs.append(REPORTS_DIR)
+        if os.path.exists("reports") and "reports" not in source_dirs:
+            source_dirs.append("reports")
+
+    # If persistent volume reports directory exists, ensure bundled reports are copied into it
+    if REPORTS_DIR and REPORTS_DIR != "reports" and os.path.exists("reports"):
+        try:
+            os.makedirs(REPORTS_DIR, exist_ok=True)
+            for f in os.listdir("reports"):
+                if f.endswith(".csv"):
+                    dest = os.path.join(REPORTS_DIR, f)
+                    if not os.path.exists(dest):
+                        shutil.copy2(os.path.join("reports", f), dest)
+        except Exception:
+            pass
+
     with get_connection() as conn:
         c = conn.cursor()
-        for fname in sorted(os.listdir(reports_dir)):
-            if not fname.endswith(".csv") or fname.startswith(".") or fname in ("report_latest.csv", "today_report.csv", "livestream_attendance_report.csv"):
+        for r_dir in source_dirs:
+            if not os.path.exists(r_dir):
                 continue
-            filepath = os.path.join(reports_dir, fname)
-            
-            match = re.search(r"(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", fname)
-            if match:
-                y, m, d, hh, mm, ss = match.groups()
-                timestamp_key = f"{y}{m}{d}_{hh}{mm}{ss}"
-                stream_id = f"stream_{timestamp_key}"
-                start_time_iso = f"{y}-{m}-{d}T{hh}:{mm}:{ss}"
-            else:
-                mtime = os.path.getmtime(filepath)
-                start_time_iso = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
-                clean_name = os.path.splitext(fname)[0]
-                stream_id = f"stream_{clean_name}"
+            for fname in sorted(os.listdir(r_dir)):
+                if not fname.endswith(".csv") or fname.startswith(".") or fname in ("report_latest.csv", "today_report.csv", "livestream_attendance_report.csv"):
+                    continue
+                filepath = os.path.join(r_dir, fname)
+                
+                match = re.search(r"(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", fname)
+                if match:
+                    y, m, d, hh, mm, ss = match.groups()
+                    timestamp_key = f"{y}{m}{d}_{hh}{mm}{ss}"
+                    stream_id = f"stream_{timestamp_key}"
+                    start_time_iso = f"{y}-{m}-{d}T{hh}:{mm}:{ss}"
+                else:
+                    mtime = os.path.getmtime(filepath)
+                    start_time_iso = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+                    clean_name = os.path.splitext(fname)[0]
+                    stream_id = f"stream_{clean_name}"
 
-            c.execute("SELECT COUNT(*) FROM streams WHERE stream_id = ? OR start_time = ? OR csv_path = ?", (stream_id, start_time_iso, filepath))
-            if c.fetchone()[0] > 0:
-                continue
+                c.execute("SELECT COUNT(*) FROM streams WHERE stream_id = ? OR start_time = ? OR csv_path = ?", (stream_id, start_time_iso, filepath))
+                if c.fetchone()[0] > 0:
+                    continue
             
             try:
                 with open(filepath, "r", encoding="utf-8", errors="replace") as f:
