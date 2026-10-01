@@ -8,8 +8,9 @@ import urllib.parse
 from pathlib import Path
 
 # Directories
-RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "recordings")
-TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "transcripts")
+DATA_DIR = os.getenv("DATA_DIR", "").strip()
+RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", os.path.join(DATA_DIR, "recordings") if DATA_DIR else "recordings")
+TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", os.path.join(DATA_DIR, "transcripts") if DATA_DIR else "transcripts")
 
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)

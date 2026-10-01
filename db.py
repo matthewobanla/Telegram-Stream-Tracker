@@ -241,6 +241,9 @@ def _sync_admins_from_json():
                         target = item.get("target")
                         name = item.get("name", "")
                         added_by = item.get("added_by", "JSON Backup")
+                        # Ignore legacy group admin sync entries
+                        if added_by == "Group Admin Sync":
+                            continue
                         if target:
                             add_admin_recipient(target, name=name, added_by=added_by, skip_json_write=True)
     except Exception:

@@ -4,7 +4,8 @@ import datetime
 import subprocess
 from pathlib import Path
 
-RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "recordings")
+DATA_DIR = os.getenv("DATA_DIR", "").strip()
+RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", os.path.join(DATA_DIR, "recordings") if DATA_DIR else "recordings")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 ENABLE_AUDIO_RECORDING = os.getenv("ENABLE_AUDIO_RECORDING", "True").lower() in ("true", "1", "yes")
