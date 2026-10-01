@@ -409,7 +409,6 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
             tracked_targets_map[username.lower()] = info
 
         print(f"[Tracked Group Added] ✅ '{title}' (ID: {entity_id_str}, Target: {formatted_target})")
-        asyncio.create_task(sync_group_admins_for_entity(entity))
         return True, f"✅ Successfully added group: **{title}** (`{formatted_target}`)"
 
     # 5. Fallback if user_client cannot resolve yet, but we have chat_hint from bot
@@ -429,31 +428,9 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
             tracked_targets_map[f"@{username.lower()}"] = info
 
         print(f"[Tracked Group Added via Bot Hint] ✅ '{title}' (ID: {entity_id_str})")
-        asyncio.create_task(sync_group_admins_for_entity(chat_hint))
         return True, f"✅ Successfully registered group: **{title}** (`{formatted_target}`)\n\n_Note: Please ensure your user account is also a member of this group so it can listen to live voice calls._"
 
     return False, f"⚠️ Could not resolve target `{target_str}`.\n_Ensure the user account is a member of the group or invite the bot to the group and use `/trackhere`._"
-
-async def sync_group_admins_for_entity(entity):
-    """Automatically queries and syncs all Telegram administrators from a tracked group into admin_recipients."""
-    try:
-        if not entity:
-            return
-        participants = await user_client.get_participants(entity, filter=types.ChannelParticipantsAdmins)
-        count = 0
-        for p in participants:
-            if not getattr(p, "bot", False):
-                username = getattr(p, "username", "")
-                first = getattr(p, "first_name", "") or ""
-                last = getattr(p, "last_name", "") or ""
-                full_name = f"{first} {last}".strip() or f"Admin {p.id}"
-                target = f"@{username}" if username else str(p.id)
-                if db.add_admin_recipient(target, name=full_name, added_by="Group Admin Sync"):
-                    count += 1
-        if count > 0:
-            print(f"[Admin Auto-Sync] Synced {count} admin(s) from group '{getattr(entity, 'title', entity)}'")
-    except Exception:
-        pass
 
 async def untrack_target(target_val):
     """Removes a target group from tracking."""
@@ -679,6 +656,7 @@ def build_stream_history_page(page=1, page_size=10, chat_id=None, group_idx=None
     
     # Resolve filter from group_idx if provided
     current_idx_str = "all"
+    selected_grp = None
     if group_idx is not None and str(group_idx).isdigit() and int(group_idx) < len(groups):
         current_idx_str = str(group_idx)
         selected_grp = groups[int(group_idx)]
@@ -689,17 +667,20 @@ def build_stream_history_page(page=1, page_size=10, chat_id=None, group_idx=None
             clean_tgt = str(chat_id).replace("-100", "").replace("-", "")
             if (clean_cid and clean_cid == clean_tgt) or (clean_tgt.lower() in g.get("chat_title", "").lower()):
                 current_idx_str = str(i)
+                selected_grp = g
                 break
 
     all_streams = db.get_all_streams(chat_id=chat_id)
     filter_label = ""
-    if chat_id and str(chat_id).lower() != "all":
+    if selected_grp:
+        filter_label = f" [{selected_grp.get('chat_title', '')}]"
+    elif chat_id and str(chat_id).lower() != "all":
         for s in all_streams:
             filter_label = f" [{s.get('chat_title', '')}]"
             break
 
     if not all_streams:
-        msg = f"⚠️ No past stream records found in database{filter_label}."
+        msg = f"⚠️ No past stream records found in database for{filter_label}." if filter_label else "⚠️ No past stream records found in database."
         btns = [
             [Button.inline("📂 Choose Another Group", b"hist_menu_sel")],
             [Button.inline("« Back to Menu", b"menu_main")]

@@ -166,6 +166,7 @@ def init_db():
             """)
             c.execute("DELETE FROM streams WHERE stream_id = 'stream_livestream_attendance_report'")
             c.execute("DELETE FROM participants WHERE stream_id = 'stream_livestream_attendance_report'")
+            c.execute("DELETE FROM admin_recipients WHERE added_by = 'Group Admin Sync'")
         except Exception:
             pass
 
@@ -646,7 +647,7 @@ def finalize_dangling_streams():
                 c.execute("UPDATE streams SET is_active = 0, duration_sec = 0.0, total_participants = 0 WHERE stream_id = ?", (sid,))
 
 def get_distinct_stream_groups():
-    """Returns a list of distinct group titles and chat_ids that have recorded streams."""
+    """Returns a list of all groups (both tracked and with recorded streams), sorted by recency."""
     try:
         finalize_dangling_streams()
         sync_all_csv_reports_to_db()
@@ -661,7 +662,34 @@ def get_distinct_stream_groups():
         GROUP BY chat_title
         ORDER BY MAX(start_time) DESC
         """)
-        return [dict(r) for r in c.fetchall()]
+        recorded_groups = [dict(r) for r in c.fetchall()]
+
+        # Also merge active tracked groups that may not have recorded a stream yet
+        c.execute("SELECT * FROM tracked_groups WHERE is_active = 1")
+        tracked = [dict(r) for r in c.fetchall()]
+
+        recorded_titles_or_ids = set()
+        for rg in recorded_groups:
+            if rg.get("chat_title"):
+                recorded_titles_or_ids.add(rg["chat_title"].lower().strip())
+            if rg.get("chat_id"):
+                clean = str(rg["chat_id"]).replace("-100", "").replace("-", "").strip()
+                if clean:
+                    recorded_titles_or_ids.add(clean)
+
+        for tg in tracked:
+            title = tg.get("title") or tg.get("target") or "Tracked Group"
+            eid = str(tg.get("entity_id") or "").replace("-100", "").replace("-", "").strip()
+            target = str(tg.get("target") or "").replace("-100", "").replace("-", "").strip().lower()
+
+            if title.lower().strip() not in recorded_titles_or_ids and eid not in recorded_titles_or_ids and target not in recorded_titles_or_ids:
+                recorded_groups.append({
+                    "chat_title": title,
+                    "chat_id": tg.get("entity_id") or tg.get("target") or "",
+                    "stream_count": 0
+                })
+
+        return recorded_groups
 
 def get_all_streams(chat_id=None):
     """Returns all completed streams with 1-based sequential index numbers (1 = first, N = latest)."""
