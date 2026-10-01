@@ -1801,76 +1801,79 @@ async def main():
     print("Starting Telegram Live Stream Participant Tracker (Multi-Group)...")
     print("=" * 60)
 
-    print("[Stream Monitor] : Connecting User Account to monitor voice/video streams...")
-    while True:
-        try:
-            if not user_client.is_connected():
-                await user_client.connect()
-                if not await user_client.is_user_authorized():
-                    if not sys.stdin or not sys.stdin.isatty():
-                        print("\n" + "=" * 60)
-                        print("[CRITICAL ERROR] Telegram User Account is NOT authorized!")
-                        print("On Koyeb / Railway / Render, you must set the 'SESSION_B64' environment variable.")
-                        print("Generate it on your PC by running: python export_session.py")
-                        print("=" * 60 + "\n")
-                        await asyncio.sleep(60)
-                        continue
-                    else:
-                        await user_client.start()
-            user_me = await user_client.get_me()
-            if not user_me:
-                if not sys.stdin or not sys.stdin.isatty():
-                    print("\n" + "=" * 60)
-                    print("[CRITICAL NOTICE] User session is not authorized.")
-                    print("Please ensure 'SESSION_STRING' is set in your Railway / Koyeb variables.")
-                    print("=" * 60 + "\n")
-                    await asyncio.sleep(15)
-                    continue
-                else:
-                    await user_client.start()
-                    user_me = await user_client.get_me()
-
-            first_name = getattr(user_me, "first_name", "") or getattr(user_me, "title", "User")
-            uname = getattr(user_me, "username", "") or "NoUsername"
-            print(f"[Stream Monitor] : Connected as {first_name} (@{uname})")
-            try:
-                print("[Stream Monitor] : Loading dialogs & caching group entities...")
-                await user_client.get_dialogs(limit=250)
-            except Exception as de:
-                print(f"[Dialogs Cache Notice] {de}")
-            break
-        except Exception as e:
-            print(f"[User Client Connect Retry] {e}. Retrying in 5s...")
-            await asyncio.sleep(5)
-
+    # 1. Start the Telegram Bot UI immediately so it is responsive to users right away
     await try_start_bot()
 
-    # Load and seed target groups from Config / ENV
+    # 2. Load and seed target groups & admin recipients from Config / ENV
     config_targets = [t.strip() for t in str(TARGET_CHAT_ENV).split(",") if t.strip()]
     for t in config_targets:
         db.add_tracked_group(t, added_by="Config")
 
-    # Load and seed admin recipients from Config / ENV
     config_admins = [a.strip() for a in str(ADMIN_CHAT_ID).split(",") if a.strip()]
     for a in config_admins:
         db.add_admin_recipient(a, added_by="Config")
 
-    # Load all tracked groups from Database
-    db_groups = db.get_tracked_groups()
-    print(f"\nResolving {len(db_groups)} tracked target group(s)...")
-    for g in db_groups:
-        target = g.get("target") or g.get("entity_id")
-        if target:
-            await resolve_and_add_target(target, added_by=g.get("added_by", "Database"))
+    # 3. Connect User Account in background task
+    async def connect_user_client_and_targets():
+        print("[Stream Monitor] : Connecting User Account to monitor voice/video streams...")
+        while True:
+            try:
+                if not user_client.is_connected():
+                    await user_client.connect()
+                    if not await user_client.is_user_authorized():
+                        if not sys.stdin or not sys.stdin.isatty():
+                            print("\n" + "=" * 60)
+                            print("[CRITICAL ERROR] Telegram User Account is NOT authorized!")
+                            print("On Koyeb / Railway / Render, you must set the 'SESSION_B64' environment variable.")
+                            print("Generate it on your PC by running: python export_session.py")
+                            print("=" * 60 + "\n")
+                            await asyncio.sleep(60)
+                            continue
+                        else:
+                            await user_client.start()
+                user_me = await user_client.get_me()
+                if not user_me:
+                    if not sys.stdin or not sys.stdin.isatty():
+                        print("\n" + "=" * 60)
+                        print("[CRITICAL NOTICE] User session is not authorized.")
+                        print("Please ensure 'SESSION_STRING' is set in your Railway / Koyeb variables.")
+                        print("=" * 60 + "\n")
+                        await asyncio.sleep(15)
+                        continue
+                    else:
+                        await user_client.start()
+                        user_me = await user_client.get_me()
 
-    all_admins = get_all_admin_recipients()
-    print(f"\n[READY] Participant tracking active for {len(tracked_entities)} group(s)!")
-    for eid, info in tracked_entities.items():
-        print(f"  • Group: {info['title']} ({info['target']})")
-    print(f"  • Active Admin Recipients ({len(all_admins)}): {', '.join(all_admins) if all_admins else 'None'}")
-    print("  Auto-generates attendance CSV reports on stream end.")
-    print("  Permanently persists all sessions to SQLite database.\n")
+                first_name = getattr(user_me, "first_name", "") or getattr(user_me, "title", "User")
+                uname = getattr(user_me, "username", "") or "NoUsername"
+                print(f"[Stream Monitor] : Connected as {first_name} (@{uname})")
+                try:
+                    print("[Stream Monitor] : Loading dialogs & caching group entities...")
+                    await user_client.get_dialogs(limit=250)
+                except Exception as de:
+                    print(f"[Dialogs Cache Notice] {de}")
+                break
+            except Exception as e:
+                print(f"[User Client Connect Retry] {e}. Retrying in 5s...")
+                await asyncio.sleep(5)
 
+        # Load all tracked groups from Database
+        db_groups = db.get_tracked_groups()
+        print(f"\nResolving {len(db_groups)} tracked target group(s)...")
+        for g in db_groups:
+            target = g.get("target") or g.get("entity_id")
+            if target:
+                await resolve_and_add_target(target, added_by=g.get("added_by", "Database"))
+
+        all_admins = get_all_admin_recipients()
+        print(f"\n[READY] Participant tracking active for {len(tracked_entities)} group(s)!")
+        for eid, info in tracked_entities.items():
+            print(f"  • Group: {info['title']} ({info['target']})")
+        print(f"  • Active Admin Recipients ({len(all_admins)}): {', '.join(all_admins) if all_admins else 'None'}")
+        print("  Auto-generates attendance CSV reports on stream end.")
+        print("  Permanently persists all sessions to SQLite database.\n")
+
+    user_task = asyncio.create_task(connect_user_client_and_targets())
     poll_task = asyncio.create_task(background_poll_loop())
 
     stop_event = asyncio.Event()
@@ -1881,6 +1884,7 @@ async def main():
     except BaseException as e:
         print(f"[Notice] Main loop interrupted ({type(e).__name__}: {e})")
     finally:
+        user_task.cancel()
         poll_task.cancel()
         try:
             await poll_task
