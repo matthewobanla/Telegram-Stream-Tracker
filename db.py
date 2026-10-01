@@ -588,6 +588,24 @@ def finalize_dangling_streams():
             else:
                 c.execute("UPDATE streams SET is_active = 0, duration_sec = 0.0, total_participants = 0 WHERE stream_id = ?", (sid,))
 
+def get_distinct_stream_groups():
+    """Returns a list of distinct group titles and chat_ids that have recorded streams."""
+    try:
+        finalize_dangling_streams()
+        sync_all_csv_reports_to_db()
+    except Exception:
+        pass
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+        SELECT chat_title, COALESCE(chat_id, '') as chat_id, COUNT(*) as stream_count 
+        FROM streams 
+        WHERE (total_participants > 0 OR duration_sec > 0 OR is_active = 0)
+        GROUP BY chat_title, chat_id
+        ORDER BY MAX(start_time) DESC
+        """)
+        return [dict(r) for r in c.fetchall()]
+
 def get_all_streams(chat_id=None):
     """Returns all completed streams with 1-based sequential index numbers (1 = first, N = latest)."""
     try:
@@ -599,7 +617,7 @@ def get_all_streams(chat_id=None):
     with get_connection() as conn:
         c = conn.cursor()
         rows = []
-        if chat_id is not None and str(chat_id).strip():
+        if chat_id is not None and str(chat_id).strip() and str(chat_id).strip().lower() != "all":
             cid_str = str(chat_id).strip()
             clean_id = cid_str.replace("-100", "").replace("-", "")
             c.execute("""
@@ -609,9 +627,7 @@ def get_all_streams(chat_id=None):
             ORDER BY start_time ASC, rowid ASC
             """, (cid_str, f"%{clean_id}%", f"%{cid_str}%"))
             rows = [dict(r) for r in c.fetchall()]
-
-        # Fallback to all streams if specific chat filter returns nothing
-        if not rows:
+        else:
             c.execute("""
             SELECT * FROM streams 
             WHERE (is_active = 0 OR end_time IS NOT NULL OR duration_sec > 0 OR total_participants > 0)
