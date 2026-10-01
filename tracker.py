@@ -601,7 +601,6 @@ def format_admin_list_message():
 def format_groups_list_message():
     tracked_db = db.get_tracked_groups()
     
-    # Merge with in-memory tracked_entities with robust deduplication
     groups_dict = {}
     
     def normalize_key(val):
@@ -617,32 +616,13 @@ def format_groups_list_message():
         eid = str(g.get("entity_id", "")).strip()
         key = normalize_key(eid or target)
         if key and key not in groups_dict:
+            mem_info = tracked_entities.get(eid) or tracked_targets_map.get(target.lower())
+            title = (mem_info.get("title") if mem_info else None) or g.get("title") or target
             groups_dict[key] = {
-                "title": g.get("title") or target,
+                "title": title,
                 "target": target,
                 "entity_id": eid
             }
-            
-    for eid, info in tracked_entities.items():
-        norm_eid = normalize_key(eid)
-        norm_target = normalize_key(info.get("target"))
-        matched_key = None
-        for k in [norm_eid, norm_target]:
-            if k in groups_dict:
-                matched_key = k
-                break
-        if not matched_key:
-            groups_dict[norm_eid or norm_target] = {
-                "title": info.get("title", eid),
-                "target": info.get("target", eid),
-                "entity_id": str(eid)
-            }
-        else:
-            # Update title if memory has a better title
-            if info.get("title") and info["title"] != eid:
-                groups_dict[matched_key]["title"] = info["title"]
-            if info.get("target"):
-                groups_dict[matched_key]["target"] = info["target"]
 
     if not groups_dict:
         return "⚠️ No groups are currently being tracked.\nUse `/trackhere` in a group or `/addgroup @username` to add one."
@@ -904,13 +884,25 @@ async def execute_bot_refresh():
 
     # 1. Reload and resolve tracked groups from DB
     db_groups = db.get_tracked_groups()
-    resolved_count = 0
+    valid_eids = set()
+    valid_targets = set()
     for g in db_groups:
         target = g.get("target") or g.get("entity_id")
         if target:
             ok, _ = await resolve_and_add_target(target, added_by=g.get("added_by", "Database"))
             if ok:
-                resolved_count += 1
+                valid_eids.add(str(g.get("entity_id", "")).strip())
+                valid_targets.add(str(target).strip().lower())
+
+    # Purge in-memory tracked entities that were deleted from DB/Config
+    for eid in list(tracked_entities.keys()):
+        info = tracked_entities[eid]
+        t = info.get("target", "").lower()
+        if eid not in valid_eids and t not in valid_targets:
+            tracked_entities.pop(eid, None)
+            keys_to_del = [k for k, v in tracked_targets_map.items() if v.get("entity_id") == eid or k == t]
+            for k in keys_to_del:
+                tracked_targets_map.pop(k, None)
 
     # 2. Sync admin recipients from bot dialogs
     try:
