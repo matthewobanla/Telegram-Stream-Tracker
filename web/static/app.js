@@ -26,8 +26,26 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function triggerHaptic(type = "light") {
-    if (tg?.HapticFeedback) {
-      tg.HapticFeedback.impactOccurred(type);
+    try {
+      if (tg && tg.HapticFeedback) {
+        if (type === "selection") {
+          if (typeof tg.HapticFeedback.selectionChanged === "function") {
+            tg.HapticFeedback.selectionChanged();
+          }
+        } else if (["light", "medium", "heavy", "rigid", "soft"].includes(type)) {
+          if (typeof tg.HapticFeedback.impactOccurred === "function") {
+            tg.HapticFeedback.impactOccurred(type);
+          }
+        } else if (["error", "success", "warning"].includes(type)) {
+          if (typeof tg.HapticFeedback.notificationOccurred === "function") {
+            tg.HapticFeedback.notificationOccurred(type);
+          }
+        } else {
+          tg.HapticFeedback.impactOccurred("light");
+        }
+      }
+    } catch (e) {
+      console.warn("Haptic error caught:", e);
     }
   }
 
@@ -51,20 +69,32 @@ document.addEventListener("DOMContentLoaded", () => {
   const tabButtons = document.querySelectorAll(".nav-tab");
   const tabPanes = document.querySelectorAll(".tab-pane");
 
-  tabButtons.forEach(btn => {
-    btn.addEventListener("click", () => {
-      triggerHaptic("selection");
-      const targetTab = btn.getAttribute("data-tab");
+  function switchTab(targetTab) {
+    if (!targetTab) return;
+    triggerHaptic("selection");
 
-      tabButtons.forEach(b => b.classList.remove("active"));
-      tabPanes.forEach(p => p.classList.remove("active"));
+    tabButtons.forEach(b => {
+      const isTarget = (b.dataset.tab === targetTab || b.getAttribute("data-tab") === targetTab);
+      b.classList.toggle("active", isTarget);
+    });
 
-      btn.classList.add("active");
-      const activePane = document.getElementById(`tab-${targetTab}`);
-      if (activePane) activePane.classList.add("active");
+    tabPanes.forEach(p => {
+      p.classList.toggle("active", p.id === `tab-${targetTab}`);
+    });
 
+    try {
       if (targetTab === "live") loadLiveStatus();
       if (targetTab === "settings") loadSettingsData();
+    } catch (err) {
+      console.error("Tab data load notice:", err);
+    }
+  }
+
+  tabButtons.forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const targetTab = btn.dataset.tab || btn.getAttribute("data-tab");
+      switchTab(targetTab);
     });
   });
 
@@ -162,11 +192,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Filter Row & Search Handlers
   document.querySelectorAll(".filter-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
       triggerHaptic("selection");
       document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      currentFilter = btn.getAttribute("data-filter");
+      currentFilter = btn.dataset.filter || btn.getAttribute("data-filter") || "all";
       renderStreamsList();
     });
   });
@@ -350,9 +381,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Subtab Segmented Switcher
   document.querySelectorAll(".subtab-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
       triggerHaptic("selection");
-      const targetSubtab = btn.getAttribute("data-subtab");
+      const targetSubtab = btn.dataset.subtab || btn.getAttribute("data-subtab");
 
       document.querySelectorAll(".subtab-btn").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");

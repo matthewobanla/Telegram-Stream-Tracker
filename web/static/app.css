@@ -246,6 +246,10 @@ body {
   color: var(--color-bg);
 }
 
+.nav-tab *, .filter-btn *, .subtab-btn * {
+  pointer-events: none;
+}
+
 /* Tags & Badges */
 .tag {
   display: inline-flex;
