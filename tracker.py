@@ -47,6 +47,9 @@ AUTO_POST_TO_GROUP = bool(os.getenv("AUTO_POST_TO_GROUP", getattr(config, "AUTO_
 CSV_OUTPUT_DIR = os.getenv("CSV_OUTPUT_DIR", config.CSV_OUTPUT_DIR)
 MIN_ATTENDANCE_SECONDS = int(os.getenv("MIN_ATTENDANCE_SECONDS", getattr(config, "MIN_ATTENDANCE_SECONDS", 30)))
 EXCLUDE_PREVIEWS_FROM_CSV = bool(os.getenv("EXCLUDE_PREVIEWS_FROM_CSV", getattr(config, "EXCLUDE_PREVIEWS_FROM_CSV", False)))
+ENABLE_DASHBOARD = os.getenv("ENABLE_DASHBOARD", "True").lower() in ("true", "1", "yes")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", getattr(config, "DASHBOARD_URL", "")).strip()
+DASHBOARD_PORT = int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", getattr(config, "DASHBOARD_PORT", 8080))))
 
 os.makedirs(CSV_OUTPUT_DIR, exist_ok=True)
 db.init_db()
@@ -884,7 +887,8 @@ def get_help_menu():
         "• `/stats` or `/report` — View participant leaderboard & attendance %\n"
         "• `/history` or `/streams` — View log of past stream sessions & metrics\n"
         "• `/livestatus` — Check live voice chat status across all tracked groups\n"
-        "• `/export` or `/csv` — Download the attendance CSV spreadsheet\n\n"
+        "• `/export` or `/csv` — Download the attendance CSV spreadsheet\n"
+        "• `/dashboard` — Interactive Telegram Mini App Dashboard\n\n"
         "**🎙 AI Speech-to-Text & Minutes**\n"
         f"• Active Engine: **{curr_eng}** (Gemini / Groq / OpenAI / Whisper)\n"
         "• `/engine` — View or switch AI transcription engine\n"
@@ -960,13 +964,19 @@ async def execute_bot_refresh():
     }
 
 def build_main_menu_buttons():
-    return [
+    buttons = []
+    if DASHBOARD_URL:
+        buttons.append([Button.url("📱 Open Mini App Dashboard", DASHBOARD_URL)])
+    else:
+        buttons.append([Button.inline("📱 Mini App Dashboard", b"menu_dashboard")])
+    buttons.extend([
         [Button.inline("📊 Live Stats / Leaderboard", b"menu_stats"), Button.inline("🔴 Live Status", b"menu_status")],
         [Button.inline("📜 Stream History", b"menu_history"), Button.inline("📄 Download CSV Report", b"menu_export")],
         [Button.inline("👥 Tracked Groups", b"menu_groups"), Button.inline("👑 Admin Recipients", b"menu_admins")],
         [Button.inline("🎙 AI Scribe & Engine", b"menu_engine"), Button.inline("ℹ️ Help & Commands", b"menu_help")],
         [Button.inline("🔄 Refresh & Sync Bot", b"menu_refresh")]
-    ]
+    ])
+    return buttons
 
 def build_back_button(refresh_key=None):
     row = []
@@ -1052,6 +1062,32 @@ async def bot_callback_handler(event):
             await event.edit(get_help_menu(), buttons=build_main_menu_buttons(), parse_mode="markdown")
         except Exception:
             pass
+        return
+
+    elif data == b"menu_dashboard":
+        dash_text = (
+            "📱 **Telegram Mini App Dashboard**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "View recorded streams, listen to call recordings, read AI executive minutes, download verbatim transcripts, and configure settings.\n\n"
+        )
+        if DASHBOARD_URL:
+            dash_text += f"🔗 **Dashboard Web Link**: {DASHBOARD_URL}\n\nTap below to open the Mini App:"
+            btns = [
+                [Button.url("🚀 Open Dashboard", DASHBOARD_URL)],
+                [Button.inline("« Back to Menu", b"menu_main")]
+            ]
+        else:
+            dash_text += (
+                f"• Server Status: Running on port `{DASHBOARD_PORT}`\n"
+                f"• Local Web Address: `http://localhost:{DASHBOARD_PORT}`\n\n"
+                "_Tip: Set `DASHBOARD_URL=https://<your-domain>` in your environment to enable seamless one-tap Mini App launch directly inside Telegram._"
+            )
+            btns = build_back_button()
+        try:
+            await event.edit(dash_text, buttons=btns, parse_mode="markdown")
+        except Exception:
+            pass
+        return
 
     elif data == b"menu_stats":
         chat_id_str = str(event.chat_id)
@@ -1383,7 +1419,24 @@ async def bot_command_handler(event):
             return
 
     # 1. GROUP MANAGEMENT COMMANDS
-    if cmd in ["/groups", "/listgroups", "/trackedgroups"]:
+    if cmd in ["/dashboard", "/app", "/miniapp", "/web"]:
+        if DASHBOARD_URL:
+            await safe_reply(
+                event,
+                "📱 **Telegram Mini App Dashboard**\n\nTap the button below to view recorded streams, download transcripts & executive minutes, and manage tracker settings:",
+                buttons=[[Button.url("🚀 Open Dashboard", DASHBOARD_URL)]],
+                parse_mode="markdown"
+            )
+        else:
+            await safe_reply(
+                event,
+                f"📱 **Telegram Mini App Dashboard**\n\n• Web Address: `http://localhost:{DASHBOARD_PORT}`\n• Set `DASHBOARD_URL=https://...` in your `.env` to enable one-tap Mini App opening directly inside Telegram.",
+                buttons=[[Button.inline("ℹ️ Dashboard Info", b"menu_dashboard")]],
+                parse_mode="markdown"
+            )
+        return
+
+    elif cmd in ["/groups", "/listgroups", "/trackedgroups"]:
         await safe_reply(event, format_groups_list_message(), parse_mode="markdown")
 
     elif cmd in ["/trackhere", "/trackthis"]:
@@ -1960,7 +2013,16 @@ async def main():
     print("Starting Telegram Live Stream Participant Tracker (Multi-Group)...")
     print("=" * 60)
 
-    # 1. Start the Telegram Bot UI immediately so it is responsive to users right away
+    # 1. Start the Mini App Dashboard Web Server immediately for instant cloud health-checks
+    dashboard_runner = None
+    if ENABLE_DASHBOARD:
+        try:
+            import dashboard_server
+            dashboard_runner = await dashboard_server.start_dashboard_server(port=DASHBOARD_PORT)
+        except Exception as de:
+            print(f"[Dashboard Server Launch Notice] {de}")
+
+    # 2. Start the Telegram Bot UI immediately so it is responsive to users right away
     await try_start_bot()
 
     # 2. Load and seed target groups & admin recipients from Config / ENV
@@ -2045,6 +2107,11 @@ async def main():
     finally:
         user_task.cancel()
         poll_task.cancel()
+        if dashboard_runner:
+            try:
+                await dashboard_runner.cleanup()
+            except Exception:
+                pass
         try:
             await poll_task
         except (asyncio.CancelledError, Exception):

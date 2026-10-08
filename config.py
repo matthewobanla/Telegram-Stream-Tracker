@@ -50,3 +50,5 @@ else:
     CSV_OUTPUT_DIR = os.getenv("CSV_OUTPUT_DIR", "reports")
 
 EXPORT_CSV = True
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
+DASHBOARD_PORT = int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", 8080)))

@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>STREAM TRACKER.</title>
+  
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  
+  <!-- Modernist Typography: Archivo (400, 600, 800) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap" rel="stylesheet">
+  
+  <!-- Markdown parser for AI summaries -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <!-- Move Am // Modernist CSS -->
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div id="app" class="app-container">
+    
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <h1 class="brand-title">STREAM TRACKER<span class="logo-dot">.</span></h1>
+        <p class="brand-subtitle" id="user-greeting">CONTROL ROOM // VOICE TELEMETRY</p>
+      </div>
+      <div class="header-right">
+        <button id="btn-refresh" class="icon-btn" title="Sync data" aria-label="Sync">
+          ⟲
+        </button>
+      </div>
+    </header>
+
+    <!-- HUD Stat Strip (Numbers are the Hero) -->
+    <section class="hud-strip">
+      <div class="hud-cell">
+        <span class="hud-label">SESSIONS</span>
+        <span class="hud-value" id="hud-total-streams">-</span>
+        <div class="hud-meter"><div class="hud-meter-fill" style="width: 100%;"></div></div>
+      </div>
+      <div class="hud-cell">
+        <span class="hud-label">GROUPS</span>
+        <span class="hud-value" id="hud-tracked-groups">-</span>
+        <div class="hud-meter"><div class="hud-meter-fill" style="width: 100%;"></div></div>
+      </div>
+      <div class="hud-cell">
+        <span class="hud-label">ADMINS</span>
+        <span class="hud-value" id="hud-admins-count">-</span>
+        <div class="hud-meter"><div class="hud-meter-fill" style="width: 100%;"></div></div>
+      </div>
+      <div class="hud-cell">
+        <span class="hud-label">AI SCRIBE</span>
+        <span class="hud-value" id="hud-engine-name">-</span>
+        <div class="hud-meter"><div class="hud-meter-fill" style="width: 100%;"></div></div>
+      </div>
+    </section>
+
+    <!-- Navigation Tabs (Equal Width, Navy Active) -->
+    <nav class="nav-tabs">
+      <button class="nav-tab active" data-tab="streams">
+        <span>STREAMS</span>
+        <span class="badge-count" id="badge-streams">0</span>
+      </button>
+      <button class="nav-tab" data-tab="live">
+        <span>LIVE FEED</span>
+        <span class="tag tag-running hidden" id="badge-live-pulse">LIVE</span>
+      </button>
+      <button class="nav-tab" data-tab="settings">
+        <span>CONFIG</span>
+      </button>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="content-area">
+
+      <!-- TAB 1: STREAMS & RECORDINGS -->
+      <section id="tab-streams" class="tab-pane active">
+        <!-- Search & Filter Controls -->
+        <div class="search-filter-bar">
+          <div class="search-box">
+            <input type="text" id="stream-search" placeholder="SEARCH SESSIONS OR GROUPS..." autocomplete="off">
+            <button id="search-clear" class="clear-btn hidden">✕</button>
+          </div>
+          <div class="filter-row">
+            <button class="filter-btn active" data-filter="all">ALL SESSIONS</button>
+            <button class="filter-btn" data-filter="audio">AUDIO CAPTURE</button>
+            <button class="filter-btn" data-filter="transcripts">AI MINUTES</button>
+          </div>
+        </div>
+
+        <!-- Streams List Container -->
+        <div id="streams-list" class="streams-list">
+          <div class="loading-block">
+            SCANNING TELEMETRY ARCHIVE...
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: LIVE FEED & TELEMETRY -->
+      <section id="tab-live" class="tab-pane">
+        <!-- Live Call Banner -->
+        <div id="live-call-banner" class="live-status-card">
+          <div class="live-status-header">
+            <span class="live-status-title" id="live-banner-title">NO ACTIVE STREAM</span>
+            <span class="tag tag-idle" id="live-banner-tag">IDLE</span>
+          </div>
+          <p class="card-secondary" id="live-banner-desc">Tracking daemon standing by. Listening for voice chat start events.</p>
+        </div>
+
+        <h3 class="section-heading">SYSTEM TELEMETRY</h3>
+        <div class="kv-table">
+          <div class="kv-row">
+            <div class="kv-key">DB STATE</div>
+            <div class="kv-val">ONLINE (SQLITE / WAL)</div>
+          </div>
+          <div class="kv-row">
+            <div class="kv-key">CSV ENGINE</div>
+            <div class="kv-val">AUTOMATIC POST-STREAM</div>
+          </div>
+          <div class="kv-row">
+            <div class="kv-key">AI SCRIBE</div>
+            <div class="kv-val" id="telemetry-engine-name">GEMINI (ACTIVE)</div>
+          </div>
+          <div class="kv-row">
+            <div class="kv-key">ATTENDANCE</div>
+            <div class="kv-val">&ge; 30 SECONDS THRESHOLD</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: CONFIG & MANAGEMENT -->
+      <section id="tab-settings" class="tab-pane">
+        
+        <!-- AI Transcription Engine Selector -->
+        <h3 class="section-heading">AI SCRIBE ENGINE</h3>
+        <div class="radio-options-group">
+          <label class="radio-row" data-engine="gemini">
+            <div class="radio-left">
+              <div class="radio-dot-box"><div class="radio-dot-inner"></div></div>
+              <div>
+                <div class="radio-label">GOOGLE GEMINI</div>
+                <div class="radio-desc">Direct audio perception & executive minutes.</div>
+              </div>
+            </div>
+            <span class="tag tag-green">RECOMMENDED</span>
+            <input type="radio" name="engine" value="gemini" style="display:none;">
+          </label>
+
+          <label class="radio-row" data-engine="groq">
+            <div class="radio-left">
+              <div class="radio-dot-box"><div class="radio-dot-inner"></div></div>
+              <div>
+                <div class="radio-label">GROQ (WHISPER-LARGE)</div>
+                <div class="radio-desc">Ultra-fast cloud audio transcription.</div>
+              </div>
+            </div>
+            <span class="tag tag-yellow">FAST</span>
+            <input type="radio" name="engine" value="groq" style="display:none;">
+          </label>
+
+          <label class="radio-row" data-engine="openai">
+            <div class="radio-left">
+              <div class="radio-dot-box"><div class="radio-dot-inner"></div></div>
+              <div>
+                <div class="radio-label">OPENAI WHISPER</div>
+                <div class="radio-desc">Whisper audio transcription API.</div>
+              </div>
+            </div>
+            <input type="radio" name="engine" value="openai" style="display:none;">
+          </label>
+
+          <label class="radio-row" data-engine="faster_whisper">
+            <div class="radio-left">
+              <div class="radio-dot-box"><div class="radio-dot-inner"></div></div>
+              <div>
+                <div class="radio-label">FASTER-WHISPER</div>
+                <div class="radio-desc">On-device CTranslate2 model.</div>
+              </div>
+            </div>
+            <input type="radio" name="engine" value="faster_whisper" style="display:none;">
+          </label>
+        </div>
+
+        <!-- Tracked Groups Manager -->
+        <div class="section-heading">
+          <span>MONITORED GROUPS</span>
+          <button id="btn-add-group" class="btn btn-sm btn-primary">+ ADD GROUP</button>
+        </div>
+        <div id="tracked-groups-list" class="data-table-rows">
+          <div class="loading-block">LOADING GROUPS...</div>
+        </div>
+
+        <!-- Admin Recipients Manager -->
+        <div class="section-heading">
+          <span>ADMIN RECIPIENTS</span>
+          <button id="btn-add-admin" class="btn btn-sm btn-primary">+ ADD ADMIN</button>
+        </div>
+        <div id="admin-recipients-list" class="data-table-rows">
+          <div class="loading-block">LOADING ADMINS...</div>
+        </div>
+
+      </section>
+    </main>
+
+    <!-- STREAM DETAIL MODAL (Modernist Frame + Top Color Band) -->
+    <div id="stream-modal" class="modal-backdrop hidden">
+      <div class="modal-dialog">
+        <!-- Top Semantic Color Band -->
+        <div id="modal-band" class="modal-color-band band-blue">
+          <span id="modal-band-kicker">SESSION TELEMETRY</span>
+          <span id="modal-band-code">ARCHIVE</span>
+        </div>
+
+        <div class="modal-header-content">
+          <div>
+            <h2 id="modal-chat-title" class="modal-title">Stream Details</h2>
+            <div class="modal-meta" id="modal-meta-line">DATE · DURATION · ATTENDEES</div>
+          </div>
+          <button id="btn-close-modal" class="modal-close-btn">&times;</button>
+        </div>
+
+        <div class="modal-body">
+          <!-- Audio Box -->
+          <div id="audio-player-card" class="audio-box hidden">
+            <div class="audio-box-header">
+              <span>CALL AUDIO CAPTURE</span>
+              <a id="btn-download-audio" class="signal-chip active-blue" download>DOWNLOAD MP3</a>
+            </div>
+            <audio id="stream-audio-element" controls preload="metadata"></audio>
+          </div>
+
+          <!-- Subtab Segmented Bar -->
+          <div class="subtabs-bar">
+            <button class="subtab-btn active" data-subtab="participants">ATTENDANCE</button>
+            <button class="subtab-btn" data-subtab="summary">AI MINUTES</button>
+            <button class="subtab-btn" data-subtab="transcript">VERBATIM</button>
+          </div>
+
+          <!-- Subtab 1: Attendance Leaderboard -->
+          <div id="subtab-participants-content" class="subtab-content">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <span class="hud-label">PARTICIPANT LEADERBOARD</span>
+              <a id="btn-download-csv" class="btn btn-sm btn-secondary" download>EXPORT CSV →</a>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:30px;">#</th>
+                  <th>CALLER</th>
+                  <th style="width:70px;">MINS</th>
+                  <th style="width:70px; text-align:right;">ATTEND</th>
+                </tr>
+              </thead>
+              <tbody id="participants-table-body">
+                <!-- Injected via JS -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Subtab 2: AI Executive Summary -->
+          <div id="subtab-summary-content" class="subtab-content hidden">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <span class="hud-label">EXECUTIVE MINUTES & ACTIONS</span>
+              <div style="display:flex; gap:4px;">
+                <button id="btn-copy-summary" class="btn btn-sm btn-secondary">COPY</button>
+                <a id="btn-download-summary" class="btn btn-sm btn-secondary" download>SAVE .MD</a>
+              </div>
+            </div>
+            <div id="summary-text-container" class="text-viewer-box">
+              <p>Loading executive minutes...</p>
+            </div>
+          </div>
+
+          <!-- Subtab 3: Verbatim Transcript -->
+          <div id="subtab-transcript-content" class="subtab-content hidden">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <span class="hud-label">FULL VERBATIM TRANSCRIPT</span>
+              <div style="display:flex; gap:4px;">
+                <button id="btn-copy-transcript" class="btn btn-sm btn-secondary">COPY</button>
+                <a id="btn-download-transcript" class="btn btn-sm btn-secondary" download>SAVE .TXT</a>
+              </div>
+            </div>
+            <div class="text-viewer-box">
+              <pre id="transcript-text-container" class="text-viewer-pre">Loading transcript...</pre>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ADD GROUP MODAL -->
+    <div id="add-group-modal" class="modal-backdrop hidden">
+      <div class="modal-dialog modal-dialog-sm">
+        <div class="modal-color-band band-yellow">
+          <span>MONITORED TARGET</span>
+          <span>NEW</span>
+        </div>
+        <form id="form-add-group" class="modal-form">
+          <div class="form-field">
+            <label for="input-group-target">GROUP USERNAME OR CHAT ID</label>
+            <input type="text" id="input-group-target" placeholder="@groupname or -100123456789" required>
+            <span class="form-hint">Public handle (e.g. @kingshubBC) or numeric ID</span>
+          </div>
+          <div class="form-field">
+            <label for="input-group-title">GROUP TITLE (OPTIONAL)</label>
+            <input type="text" id="input-group-title" placeholder="e.g. Community Main Voice">
+          </div>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <button type="submit" class="btn btn-primary btn-full">+ ADD GROUP</button>
+            <button type="button" id="btn-cancel-add-group" class="btn btn-secondary" style="width:90px;">CANCEL</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- ADD ADMIN MODAL -->
+    <div id="add-admin-modal" class="modal-backdrop hidden">
+      <div class="modal-dialog modal-dialog-sm">
+        <div class="modal-color-band band-yellow">
+          <span>REPORT ROUTING</span>
+          <span>NEW</span>
+        </div>
+        <form id="form-add-admin" class="modal-form">
+          <div class="form-field">
+            <label for="input-admin-target">ADMIN USERNAME OR ID</label>
+            <input type="text" id="input-admin-target" placeholder="@Username or 123456789" required>
+          </div>
+          <div class="form-field">
+            <label for="input-admin-name">ADMIN NAME (OPTIONAL)</label>
+            <input type="text" id="input-admin-name" placeholder="e.g. Matthew Ọbańlá">
+          </div>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <button type="submit" class="btn btn-primary btn-full">+ ADD ADMIN</button>
+            <button type="button" id="btn-cancel-add-admin" class="btn btn-secondary" style="width:90px;">CANCEL</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+  </div>
+
+  <!-- Modernist Control Script -->
+  <script src="/static/app.js"></script>
+</body>
+</html>
