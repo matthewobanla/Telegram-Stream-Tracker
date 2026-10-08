@@ -3,11 +3,13 @@ import sys
 import json
 import asyncio
 import datetime
+import hmac
 from pathlib import Path
 from aiohttp import web
 
 import db
 import transcriber
+import auth
 
 # Configuration
 PORT = int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", "8080")))
@@ -26,10 +28,44 @@ try:
 except Exception as e:
     print(f"[Dashboard Server Warning] DB init: {e}")
 
+def set_bot_client(client):
+    """Sets Telethon bot client instance for sending OTP messages."""
+    auth.set_bot_client(client)
+
 # --- Helper Utilities ---
 
 def json_response(data, status=200):
     return web.json_response(data, status=status, dumps=lambda obj: json.dumps(obj, default=str))
+
+async def get_request_session(request):
+    """Extracts and verifies session from cookies, Bearer header, or Telegram initData."""
+    # 1. Bearer Token
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        sess = auth.verify_session(token)
+        if sess:
+            return sess
+
+    # 2. Cookie
+    cookie_token = request.cookies.get("tracker_session")
+    if cookie_token:
+        sess = auth.verify_session(cookie_token)
+        if sess:
+            return sess
+
+    # 3. Direct Telegram initData header (for seamless WebApp requests)
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    if init_data:
+        user_data, _ = auth.validate_telegram_init_data(init_data)
+        if user_data:
+            uid = user_data.get("id")
+            uname = user_data.get("username")
+            if auth.is_user_authorized(uid, uname):
+                token = auth.create_session(uid, uname, user_data.get("first_name", ""), auth_type="webapp_header")
+                return auth.verify_session(token)
+
+    return None
 
 def find_audio_file_for_stream(stream_id, stream_meta=None):
     """Searches for an audio recording file corresponding to stream_id."""
@@ -81,7 +117,7 @@ def find_transcript_files_for_stream(stream_id):
         summary_file if summary_file.exists() else None
     )
 
-# --- API Route Handlers ---
+# --- Basic / Public Routes ---
 
 async def handle_index(request):
     """Serves the main Mini App single page HTML."""
@@ -89,6 +125,175 @@ async def handle_index(request):
     if not index_path.exists():
         return web.Response(text="<h1>Telegram Stream Tracker Dashboard</h1><p>Frontend template initializing...</p>", content_type="text/html")
     return web.FileResponse(index_path)
+
+async def api_health(request):
+    """Basic health check ping for Railway / orchestrators."""
+    return json_response({
+        "status": "ok",
+        "service": "telegram-stream-tracker",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    })
+
+# --- Authentication Endpoints ---
+
+async def api_auth_webapp(request):
+    """Authenticates Telegram WebApp initData cryptographically."""
+    try:
+        data = await request.json()
+        init_data = data.get("initData", "").strip()
+        if not init_data:
+            return json_response({"error": "initData is required"}, status=400)
+
+        user_data, err = auth.validate_telegram_init_data(init_data)
+        if not user_data:
+            return json_response({"error": f"Invalid Telegram cryptographic signature: {err}"}, status=401)
+
+        user_id = user_data.get("id")
+        username = user_data.get("username", "")
+        name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip() or f"User {user_id}"
+
+        if not auth.is_user_authorized(user_id, username):
+            return json_response({
+                "error": "ACCESS_DENIED",
+                "message": f"Telegram ID {user_id} (@{username or 'no_username'}) is not an authorized administrator.",
+                "telegram_id": user_id,
+                "username": username
+            }, status=403)
+
+        token = auth.create_session(user_id, username=username, name=name, auth_type="webapp")
+        resp = json_response({
+            "success": True,
+            "token": token,
+            "user": {
+                "id": user_id,
+                "username": username,
+                "name": name,
+                "auth_type": "webapp"
+            }
+        })
+        resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
+        return resp
+    except Exception as e:
+        return json_response({"error": str(e)}, status=500)
+
+async def api_auth_request_otp(request):
+    """Sends a 6-digit OTP code directly to user's Telegram DM via the bot."""
+    try:
+        data = await request.json()
+        target = data.get("target", "").strip()
+        if not target:
+            return json_response({"error": "Telegram ID or @Username is required"}, status=400)
+
+        is_id = target.isdigit() or (target.startswith("-") and target[1:].isdigit())
+        user_id = target if is_id else None
+        username = None if is_id else target.lstrip("@")
+
+        if not auth.is_user_authorized(user_id=user_id, username=username):
+            return json_response({
+                "error": "UNAUTHORIZED_IDENTITY",
+                "message": f"'{target}' is not registered as an authorized administrator. Please contact the bot owner."
+            }, status=403)
+
+        code = auth.generate_otp_for_user(target)
+        sent, msg = await auth.send_otp_via_telegram(target, code)
+        if not sent:
+            return json_response({"error": msg}, status=500)
+
+        return json_response({
+            "success": True,
+            "message": f"Verification code dispatched to Telegram chat '{target}'.",
+            "target": target
+        })
+    except Exception as e:
+        return json_response({"error": str(e)}, status=500)
+
+async def api_auth_verify_otp(request):
+    """Validates user-submitted OTP code and creates session."""
+    try:
+        data = await request.json()
+        target = data.get("target", "").strip()
+        code = data.get("code", "").strip()
+
+        if not target or not code:
+            return json_response({"error": "Identity and 6-digit verification code are required"}, status=400)
+
+        ok, msg = auth.verify_user_otp(target, code)
+        if not ok:
+            return json_response({"error": msg}, status=401)
+
+        token = auth.create_session(user_id=target, username=target, name=f"Admin {target}", auth_type="otp")
+        resp = json_response({
+            "success": True,
+            "token": token,
+            "user": {
+                "id": target,
+                "name": f"Operator {target}",
+                "auth_type": "otp"
+            }
+        })
+        resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
+        return resp
+    except Exception as e:
+        return json_response({"error": str(e)}, status=500)
+
+async def api_auth_login_passkey(request):
+    """Validates master passkey / secret token."""
+    try:
+        data = await request.json()
+        passkey = data.get("passkey", "").strip()
+        master_key = auth.get_admin_passkey()
+
+        if not master_key:
+            return json_response({"error": "Master passkey is not configured in environment (DASHBOARD_AUTH_KEY)"}, status=400)
+
+        if not hmac.compare_digest(passkey, master_key):
+            return json_response({"error": "Invalid master passkey"}, status=401)
+
+        token = auth.create_session(user_id="master_admin", username="owner", name="Master Operator", auth_type="passkey")
+        resp = json_response({
+            "success": True,
+            "token": token,
+            "user": {
+                "id": "master_admin",
+                "name": "Master Operator",
+                "auth_type": "passkey"
+            }
+        })
+        resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
+        return resp
+    except Exception as e:
+        return json_response({"error": str(e)}, status=500)
+
+async def api_auth_me(request):
+    """Checks current active operator profile."""
+    sess = await get_request_session(request)
+    if not sess:
+        return json_response({"authenticated": False}, status=401)
+
+    return json_response({
+        "authenticated": True,
+        "user": {
+            "id": sess.get("user_id"),
+            "username": sess.get("username"),
+            "name": sess.get("name"),
+            "auth_type": sess.get("auth_type")
+        }
+    })
+
+async def api_auth_logout(request):
+    """Logs out and revokes session."""
+    token = request.cookies.get("tracker_session")
+    if token:
+        auth.destroy_session(token)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        auth.destroy_session(auth_header[7:].strip())
+
+    resp = json_response({"success": True, "message": "Logged out successfully"})
+    resp.del_cookie("tracker_session", path="/")
+    return resp
+
+# --- Protected API Handlers ---
 
 async def api_status(request):
     """System health, stats, and active config."""
@@ -100,19 +305,27 @@ async def api_status(request):
     except Exception as e:
         return json_response({"status": "error", "message": str(e)}, status=500)
 
+    sess = await get_request_session(request)
+    is_authed = bool(sess)
+
+    # Return full stats if authenticated
     return json_response({
         "status": "online",
+        "authenticated": is_authed,
+        "operator": sess.get("name") if sess else None,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "total_streams": len(all_streams),
-        "active_streams_count": len(active_streams),
-        "active_streams": active_streams,
-        "tracked_groups_count": len(tracked_groups),
-        "admins_count": len(admins),
+        "total_streams": len(all_streams) if is_authed else None,
+        "active_streams_count": len(active_streams) if is_authed else None,
+        "active_streams": active_streams if is_authed else [],
+        "tracked_groups_count": len(tracked_groups) if is_authed else None,
+        "admins_count": len(admins) if is_authed else None,
         "transcription_engine": transcriber.get_active_engine(),
         "features": {
             "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
             "groq_configured": bool(os.getenv("GROQ_API_KEY")),
             "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
+            "auth_required": True,
+            "has_passkey": bool(auth.get_admin_passkey())
         }
     })
 
@@ -124,7 +337,6 @@ async def api_streams(request):
 
     try:
         raw_streams = db.get_all_streams(chat_id=chat_id)
-        # Reverse to show newest first
         sorted_streams = list(reversed(raw_streams))[:limit]
         
         result = []
@@ -152,7 +364,6 @@ async def api_stream_detail(request):
     try:
         stream_meta, participants = db.get_stream_by_id(stream_id)
         if not stream_meta:
-            # Check by index if stream_id is numeric
             if stream_id.isdigit():
                 stream_meta = db.get_stream_by_index(int(stream_id))
                 if stream_meta:
@@ -190,7 +401,6 @@ async def api_stream_audio(request):
     if not audio_file or not audio_file.exists():
         return web.Response(text="Audio recording not found for this stream", status=404)
 
-    # aiohttp FileResponse natively handles HTTP Range / seeking
     return web.FileResponse(
         audio_file,
         headers={
@@ -261,8 +471,6 @@ async def api_stream_csv(request):
     except Exception as e:
         return json_response({"error": str(e)}, status=500)
 
-# --- Settings & Management Endpoints ---
-
 async def api_groups_get(request):
     """List tracked groups."""
     try:
@@ -278,7 +486,7 @@ async def api_groups_post(request):
         target = data.get("target", "").strip()
         title = data.get("title", "").strip()
         entity_id = data.get("entity_id", "").strip()
-        added_by = data.get("added_by", "Mini App Dashboard")
+        added_by = data.get("added_by", "Control Room Operator")
 
         if not target:
             return json_response({"error": "Target username or ChatID is required"}, status=400)
@@ -313,7 +521,7 @@ async def api_admins_post(request):
         data = await request.json()
         target = data.get("target", "").strip()
         name = data.get("name", "").strip()
-        added_by = data.get("added_by", "Mini App Dashboard")
+        added_by = data.get("added_by", "Control Room Operator")
 
         if not target:
             return json_response({"error": "Target username or ID is required"}, status=400)
@@ -373,7 +581,7 @@ async def api_settings_post(request):
 def create_app():
     app = web.Application()
 
-    # CORS Middleware / Header injection for Mini App flexibility
+    # CORS Middleware
     async def cors_middleware(app, handler):
         async def middleware(request):
             if request.method == "OPTIONS":
@@ -382,11 +590,32 @@ def create_app():
                 response = await handler(request)
             response.headers["Access-Control-Allow-Origin"] = "*"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Telegram-Init-Data"
             return response
         return middleware
 
+    # Authentication Protection Middleware for /api/* routes
+    async def auth_middleware(app, handler):
+        async def middleware(request):
+            path = request.path
+            # Allow public index, static assets, health check, and auth endpoints
+            if not path.startswith("/api/") or path.startswith("/api/auth/") or path == "/api/health" or path == "/api/status":
+                return await handler(request)
+
+            # Check authentication
+            sess = await get_request_session(request)
+            if not sess:
+                return json_response({
+                    "error": "UNAUTHORIZED",
+                    "message": "Authentication required. Please authenticate with your Telegram ID or passkey."
+                }, status=401)
+
+            request["session"] = sess
+            return await handler(request)
+        return middleware
+
     app.middlewares.append(cors_middleware)
+    app.middlewares.append(auth_middleware)
 
     # Static Routes
     if STATIC_DIR.exists():
@@ -395,8 +624,19 @@ def create_app():
     # Frontend Single Page
     app.router.add_get("/", handle_index)
 
-    # API Routes
+    # Public / Health
+    app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/status", api_status)
+
+    # Auth Endpoints
+    app.router.add_post("/api/auth/telegram-webapp", api_auth_webapp)
+    app.router.add_post("/api/auth/request-otp", api_auth_request_otp)
+    app.router.add_post("/api/auth/verify-otp", api_auth_verify_otp)
+    app.router.add_post("/api/auth/login-passkey", api_auth_login_passkey)
+    app.router.add_get("/api/auth/me", api_auth_me)
+    app.router.add_post("/api/auth/logout", api_auth_logout)
+
+    # Protected API Routes
     app.router.add_get("/api/streams", api_streams)
     app.router.add_get("/api/streams/{stream_id}", api_stream_detail)
     app.router.add_get("/api/streams/{stream_id}/audio", api_stream_audio)
@@ -424,10 +664,10 @@ async def start_dashboard_server(host=HOST, port=PORT):
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
-    print(f"[Mini App Dashboard] 🚀 Web server running at http://{host}:{port}")
+    print(f"[Mini App Dashboard] 🚀 Web server running with Telegram Auth at http://{host}:{port}")
     return runner
 
 if __name__ == "__main__":
     app = create_app()
-    print(f"[Mini App Dashboard] Starting standalone server on http://{HOST}:{PORT}...")
+    print(f"[Mini App Dashboard] Starting server with Telegram Auth on http://{HOST}:{PORT}...")
     web.run_app(app, host=HOST, port=PORT)

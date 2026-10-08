@@ -29,6 +29,9 @@
         <p class="brand-subtitle" id="user-greeting">CONTROL ROOM // VOICE TELEMETRY</p>
       </div>
       <div class="header-right">
+        <button id="btn-auth-lock" class="icon-btn" title="Authentication / Lock" aria-label="Auth">
+          🔒
+        </button>
         <button id="btn-theme-toggle" class="icon-btn" title="Toggle dark/light mode" aria-label="Toggle theme">
           ◐
         </button>
@@ -342,6 +345,65 @@
             <button type="button" id="btn-cancel-add-admin" class="btn btn-secondary" style="width:90px;">CANCEL</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- AUTHENTICATION GATE MODAL -->
+    <div id="auth-gate" class="modal-backdrop hidden" style="z-index: 9999;">
+      <div class="modal-dialog modal-dialog-sm" style="border: 2px solid var(--color-accent); max-width: 420px;">
+        <div class="modal-color-band band-red">
+          <span>SECURITY CHECKPOINT</span>
+          <span>OPERATOR AUTH</span>
+        </div>
+        
+        <div style="padding: 16px 16px 12px;">
+          <h2 style="font-size: 15px; font-weight: 800; letter-spacing: -0.01em; margin-bottom: 3px;">CONTROL ROOM ACCESS<span class="logo-dot">.</span></h2>
+          <p style="font-size: 11px; font-weight: 600; color: var(--color-neutral-700); text-transform: uppercase; margin-bottom: 12px;">
+            VERIFY TELEGRAM IDENTITY OR MASTER PASSKEY
+          </p>
+
+          <div id="auth-alert" class="status-banner banner-red hidden" style="margin-bottom: 12px; font-size: 11px; padding: 8px 10px; line-height: 1.4;"></div>
+
+          <!-- Auth Mode Tabs -->
+          <div class="filter-strip" style="margin-bottom: 12px; display: flex;">
+            <button type="button" id="tab-auth-otp" class="filter-btn active" style="flex:1;">TELEGRAM ID</button>
+            <button type="button" id="tab-auth-key" class="filter-btn" style="flex:1;">PASSKEY</button>
+          </div>
+
+          <!-- Form 1: Telegram ID OTP Verification -->
+          <div id="auth-section-otp">
+            <div id="otp-step-request">
+              <div class="form-field">
+                <label for="input-auth-identity">TELEGRAM USER ID OR @USERNAME</label>
+                <input type="text" id="input-auth-identity" placeholder="e.g. 1067204907 or @KingmattMO" autocomplete="username">
+                <span class="form-hint">A 6-digit code will be sent to your Telegram DM</span>
+              </div>
+              <button type="button" id="btn-request-otp" class="btn btn-primary btn-full">REQUEST CODE »</button>
+            </div>
+
+            <div id="otp-step-verify" class="hidden">
+              <div class="form-field">
+                <label for="input-auth-code">6-DIGIT VERIFICATION CODE</label>
+                <input type="text" id="input-auth-code" maxlength="6" placeholder="123456" pattern="[0-9]*" inputmode="numeric" style="letter-spacing: 0.3em; font-size: 18px; font-weight: 800; text-align: center;">
+                <span class="form-hint" id="otp-hint-target">Code dispatched via Telegram Bot</span>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button type="button" id="btn-submit-otp" class="btn btn-primary btn-full">VERIFY & UNLOCK</button>
+                <button type="button" id="btn-back-otp" class="btn btn-secondary" style="width:80px;">BACK</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Form 2: Master Passkey -->
+          <div id="auth-section-key" class="hidden">
+            <div class="form-field">
+              <label for="input-auth-key">DASHBOARD MASTER PASSKEY</label>
+              <input type="password" id="input-auth-key" placeholder="Enter DASHBOARD_AUTH_KEY" autocomplete="current-password">
+              <span class="form-hint">Configured in server environment variables</span>
+            </div>
+            <button type="button" id="btn-submit-key" class="btn btn-primary btn-full">UNLOCK DASHBOARD</button>
+          </div>
+        </div>
       </div>
     </div>
 

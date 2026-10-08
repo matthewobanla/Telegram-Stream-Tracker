@@ -1,6 +1,6 @@
 /**
  * MOVE AM // MODERNIST CONTROL ROOM DASHBOARD
- * Telemetry, Audio Scribe & System Configuration
+ * Telemetry, Audio Scribe & System Configuration with Telegram ID Authentication
  */
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -11,13 +11,6 @@ document.addEventListener("DOMContentLoaded", () => {
     tg.expand();
     if (tg.enableClosingConfirmation) {
       tg.enableClosingConfirmation();
-    }
-    const user = tg.initDataUnsafe?.user;
-    if (user?.first_name) {
-      const greetingEl = document.getElementById("user-greeting");
-      if (greetingEl) {
-        greetingEl.textContent = `OPERATOR: ${user.first_name.toUpperCase()} // TELEMETRY ACTIVE`;
-      }
     }
   }
 
@@ -87,15 +80,6 @@ document.addEventListener("DOMContentLoaded", () => {
     toggleTheme();
   });
 
-  document.getElementById("btn-refresh")?.addEventListener("click", (e) => {
-    e.preventDefault();
-    triggerHaptic("light");
-    showToast("SYNCING TELEMETRY...");
-    loadStreams();
-    loadLiveStatus();
-    loadSettingsData();
-  });
-
   function triggerHaptic(type = "light") {
     try {
       if (tg && tg.HapticFeedback) {
@@ -129,6 +113,307 @@ document.addEventListener("DOMContentLoaded", () => {
     setTimeout(() => {
       toast.remove();
     }, duration);
+  }
+
+  // --- AUTHENTICATION STATE & LOGIC ---
+  let authToken = localStorage.getItem("tracker_auth_token") || "";
+  let currentAuthUser = null;
+  let activeOtpTarget = "";
+
+  const authGate = document.getElementById("auth-gate");
+  const authAlert = document.getElementById("auth-alert");
+  const btnAuthLock = document.getElementById("btn-auth-lock");
+
+  function showAuthGate(errorMessage = null) {
+    if (authGate) authGate.classList.remove("hidden");
+    if (btnAuthLock) {
+      btnAuthLock.textContent = "🔒";
+      btnAuthLock.title = "Authenticate Operator";
+    }
+    if (errorMessage) {
+      showAuthAlert(errorMessage);
+    }
+  }
+
+  function hideAuthGate() {
+    if (authGate) authGate.classList.add("hidden");
+    if (authAlert) authAlert.classList.add("hidden");
+    if (btnAuthLock) {
+      btnAuthLock.textContent = "🔓";
+      btnAuthLock.title = currentAuthUser ? `Logged in: ${currentAuthUser.name} (Click to lock)` : "Authenticated";
+    }
+  }
+
+  function showAuthAlert(msg) {
+    if (!authAlert) return;
+    authAlert.textContent = msg.toUpperCase();
+    authAlert.classList.remove("hidden");
+  }
+
+  async function apiFetch(url, options = {}) {
+    const headers = options.headers ? { ...options.headers } : {};
+    if (authToken) {
+      headers["Authorization"] = `Bearer ${authToken}`;
+    }
+    if (tg && tg.initData) {
+      headers["X-Telegram-Init-Data"] = tg.initData;
+    }
+    options.headers = headers;
+
+    const res = await fetch(url, options);
+    if (res.status === 401 && !url.includes("/api/auth/")) {
+      showAuthGate("AUTHENTICATION REQUIRED // OPERATOR SESSION EXPIRED");
+    }
+    return res;
+  }
+
+  // Wire Auth Gate Tabs & Forms
+  const tabAuthOtp = document.getElementById("tab-auth-otp");
+  const tabAuthKey = document.getElementById("tab-auth-key");
+  const secAuthOtp = document.getElementById("auth-section-otp");
+  const secAuthKey = document.getElementById("auth-section-key");
+
+  tabAuthOtp?.addEventListener("click", () => {
+    triggerHaptic("selection");
+    tabAuthOtp.classList.add("active");
+    tabAuthKey.classList.remove("active");
+    secAuthOtp.classList.remove("hidden");
+    secAuthKey.classList.add("hidden");
+    if (authAlert) authAlert.classList.add("hidden");
+  });
+
+  tabAuthKey?.addEventListener("click", () => {
+    triggerHaptic("selection");
+    tabAuthKey.classList.add("active");
+    tabAuthOtp.classList.remove("active");
+    secAuthKey.classList.remove("hidden");
+    secAuthOtp.classList.add("hidden");
+    if (authAlert) authAlert.classList.add("hidden");
+  });
+
+  // Request OTP Button
+  const btnRequestOtp = document.getElementById("btn-request-otp");
+  const otpStepRequest = document.getElementById("otp-step-request");
+  const otpStepVerify = document.getElementById("otp-step-verify");
+  const otpHintTarget = document.getElementById("otp-hint-target");
+
+  btnRequestOtp?.addEventListener("click", async () => {
+    const target = document.getElementById("input-auth-identity").value.trim();
+    if (!target) {
+      showAuthAlert("PLEASE ENTER YOUR TELEGRAM USER ID OR @USERNAME");
+      return;
+    }
+
+    triggerHaptic("medium");
+    btnRequestOtp.disabled = true;
+    btnRequestOtp.textContent = "SENDING CODE...";
+
+    try {
+      const res = await fetch("/api/auth/request-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target })
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        activeOtpTarget = target;
+        otpStepRequest.classList.add("hidden");
+        otpStepVerify.classList.remove("hidden");
+        if (otpHintTarget) otpHintTarget.textContent = `Code sent to Telegram chat: ${target}`;
+        if (authAlert) authAlert.classList.add("hidden");
+        showToast("CODE SENT TO YOUR TELEGRAM");
+        document.getElementById("input-auth-code")?.focus();
+      } else {
+        showAuthAlert(data.message || data.error || "FAILED TO SEND CODE");
+      }
+    } catch (err) {
+      showAuthAlert("CONNECTION ERROR WHILE REQUESTING CODE");
+    } finally {
+      btnRequestOtp.disabled = false;
+      btnRequestOtp.textContent = "REQUEST CODE »";
+    }
+  });
+
+  // Back button in OTP form
+  document.getElementById("btn-back-otp")?.addEventListener("click", () => {
+    triggerHaptic("light");
+    otpStepVerify.classList.add("hidden");
+    otpStepRequest.classList.remove("hidden");
+    if (authAlert) authAlert.classList.add("hidden");
+  });
+
+  // Submit OTP Verification
+  const btnSubmitOtp = document.getElementById("btn-submit-otp");
+  btnSubmitOtp?.addEventListener("click", async () => {
+    const code = document.getElementById("input-auth-code").value.trim();
+    if (!code || code.length < 4) {
+      showAuthAlert("PLEASE ENTER THE 6-DIGIT VERIFICATION CODE");
+      return;
+    }
+
+    triggerHaptic("heavy");
+    btnSubmitOtp.disabled = true;
+    btnSubmitOtp.textContent = "VERIFYING...";
+
+    try {
+      const res = await fetch("/api/auth/verify-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: activeOtpTarget, code })
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        authToken = data.token;
+        localStorage.setItem("tracker_auth_token", authToken);
+        currentAuthUser = data.user;
+
+        const greetingEl = document.getElementById("user-greeting");
+        if (greetingEl) {
+          greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} // TELEMETRY ACTIVE`;
+        }
+
+        hideAuthGate();
+        showToast("OPERATOR AUTHENTICATED");
+        loadStreams();
+        loadLiveStatus();
+      } else {
+        showAuthAlert(data.message || data.error || "INCORRECT VERIFICATION CODE");
+      }
+    } catch (err) {
+      showAuthAlert("NETWORK ERROR DURING CODE VERIFICATION");
+    } finally {
+      btnSubmitOtp.disabled = false;
+      btnSubmitOtp.textContent = "VERIFY & UNLOCK";
+    }
+  });
+
+  // Submit Master Passkey
+  const btnSubmitKey = document.getElementById("btn-submit-key");
+  btnSubmitKey?.addEventListener("click", async () => {
+    const passkey = document.getElementById("input-auth-key").value.trim();
+    if (!passkey) {
+      showAuthAlert("PLEASE ENTER THE DASHBOARD MASTER PASSKEY");
+      return;
+    }
+
+    triggerHaptic("heavy");
+    btnSubmitKey.disabled = true;
+    btnSubmitKey.textContent = "AUTHENTICATING...";
+
+    try {
+      const res = await fetch("/api/auth/login-passkey", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passkey })
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        authToken = data.token;
+        localStorage.setItem("tracker_auth_token", authToken);
+        currentAuthUser = data.user;
+
+        const greetingEl = document.getElementById("user-greeting");
+        if (greetingEl) {
+          greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} // TELEMETRY ACTIVE`;
+        }
+
+        hideAuthGate();
+        showToast("OPERATOR PASSKEY ACCEPTED");
+        loadStreams();
+        loadLiveStatus();
+      } else {
+        showAuthAlert(data.error || "INVALID MASTER PASSKEY");
+      }
+    } catch (err) {
+      showAuthAlert("CONNECTION ERROR DURING PASSKEY VERIFICATION");
+    } finally {
+      btnSubmitKey.disabled = false;
+      btnSubmitKey.textContent = "UNLOCK DASHBOARD";
+    }
+  });
+
+  // Header Lock / Logout Button
+  btnAuthLock?.addEventListener("click", async () => {
+    triggerHaptic("medium");
+    if (!authGate.classList.contains("hidden")) {
+      return; // Already locked
+    }
+
+    if (confirm("Lock Control Room and end current operator session?")) {
+      try {
+        await apiFetch("/api/auth/logout", { method: "POST" });
+      } catch (e) {}
+
+      authToken = "";
+      localStorage.removeItem("tracker_auth_token");
+      currentAuthUser = null;
+      showToast("CONTROL ROOM LOCKED");
+      showAuthGate();
+    }
+  });
+
+  // Master Startup Authentication Routine
+  async function initializeAuthentication() {
+    // 1. If running inside Telegram Mini App, use cryptographic initData signature
+    if (tg && tg.initData) {
+      try {
+        const res = await fetch("/api/auth/telegram-webapp", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ initData: tg.initData })
+        });
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+          authToken = data.token;
+          localStorage.setItem("tracker_auth_token", authToken);
+          currentAuthUser = data.user;
+
+          const greetingEl = document.getElementById("user-greeting");
+          if (greetingEl) {
+            greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} (ID: ${data.user.id}) // TELEMETRY ACTIVE`;
+          }
+
+          hideAuthGate();
+          loadStreams();
+          loadLiveStatus();
+          return;
+        } else if (res.status === 403) {
+          showAuthGate(`⛔️ ACCESS DENIED // TELEGRAM ID ${data.telegram_id} IS NOT AN AUTHORIZED ADMINISTRATOR.`);
+          return;
+        }
+      } catch (err) {
+        console.warn("Telegram initData authentication notice:", err);
+      }
+    }
+
+    // 2. If running in external browser (Chrome / Safari), check existing session
+    try {
+      const res = await apiFetch("/api/auth/me");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.authenticated) {
+          currentAuthUser = data.user;
+          const greetingEl = document.getElementById("user-greeting");
+          if (greetingEl) {
+            greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} // TELEMETRY ACTIVE`;
+          }
+
+          hideAuthGate();
+          loadStreams();
+          loadLiveStatus();
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn("Session check notice:", e);
+    }
+
+    // Default: Show auth gate if unauthenticated
+    showAuthGate();
   }
 
   // State
@@ -171,7 +456,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- REFRESH BUTTON ---
   document.getElementById("btn-refresh")?.addEventListener("click", () => {
-    triggerHaptic("medium");
+    triggerHaptic("light");
     loadStreams();
     loadLiveStatus();
     showToast("SYNCING TELEMETRY...");
@@ -183,7 +468,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const badgeEl = document.getElementById("badge-streams");
 
     try {
-      const res = await fetch("/api/streams");
+      const res = await apiFetch("/api/streams");
+      if (!res.ok) {
+        if (res.status === 401) return;
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json();
       streamsData = data.streams || [];
 
@@ -262,11 +551,11 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // Filter Row & Search Handlers
-  document.querySelectorAll(".filter-btn").forEach(btn => {
+  document.querySelectorAll(".filter-btn:not(#tab-auth-otp):not(#tab-auth-key)").forEach(btn => {
     btn.addEventListener("click", (e) => {
       e.preventDefault();
       triggerHaptic("selection");
-      document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
+      document.querySelectorAll(".filter-strip:not(.auth-strip) .filter-btn").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       currentFilter = btn.dataset.filter || btn.getAttribute("data-filter") || "all";
       renderStreamsList();
@@ -338,7 +627,7 @@ document.addEventListener("DOMContentLoaded", () => {
     audioCard.classList.add("hidden");
 
     try {
-      const res = await fetch(`/api/streams/${streamId}`);
+      const res = await apiFetch(`/api/streams/${streamId}`);
       const data = await res.json();
       activeStreamDetail = data;
 
@@ -419,7 +708,7 @@ document.addEventListener("DOMContentLoaded", () => {
     downloadBtn.href = `/api/streams/${streamId}/summary?download=1`;
 
     try {
-      const res = await fetch(`/api/streams/${streamId}/summary`);
+      const res = await apiFetch(`/api/streams/${streamId}/summary`);
       if (res.ok) {
         const data = await res.json();
         const rawMarkdown = data.summary || "";
@@ -438,7 +727,7 @@ document.addEventListener("DOMContentLoaded", () => {
     downloadBtn.href = `/api/streams/${streamId}/transcript?download=1`;
 
     try {
-      const res = await fetch(`/api/streams/${streamId}/transcript`);
+      const res = await apiFetch(`/api/streams/${streamId}/transcript`);
       if (res.ok) {
         const data = await res.json();
         box.textContent = data.transcript || "No transcript text available.";
@@ -480,7 +769,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // --- LIVE MONITOR TAB & HUD STATS ---
   async function loadLiveStatus() {
     try {
-      const res = await fetch("/api/status");
+      const res = await apiFetch("/api/status");
       const status = await res.json();
 
       // Update HUD Stat Strip (Numbers are the Hero)
@@ -489,9 +778,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const hudAdmins = document.getElementById("hud-admins-count");
       const hudEngine = document.getElementById("hud-engine-name");
 
-      if (hudTotal) hudTotal.textContent = status.total_streams || 0;
-      if (hudGroups) hudGroups.textContent = status.tracked_groups_count || 0;
-      if (hudAdmins) hudAdmins.textContent = status.admins_count || 0;
+      if (hudTotal) hudTotal.textContent = status.total_streams ?? "-";
+      if (hudGroups) hudGroups.textContent = status.tracked_groups_count ?? "-";
+      if (hudAdmins) hudAdmins.textContent = status.admins_count ?? "-";
       if (hudEngine) hudEngine.textContent = (status.transcription_engine || "GEMINI").toUpperCase();
 
       const telemetryEngine = document.getElementById("telemetry-engine-name");
@@ -534,7 +823,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function loadSettingsEngine() {
     try {
-      const res = await fetch("/api/settings");
+      const res = await apiFetch("/api/settings");
       const data = await res.json();
       const eng = (data.transcription_engine || "gemini").toLowerCase();
 
@@ -562,7 +851,7 @@ document.addEventListener("DOMContentLoaded", () => {
       row.classList.add("selected");
 
       try {
-        const res = await fetch("/api/settings", {
+        const res = await apiFetch("/api/settings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ transcription_engine: newEng })
@@ -585,7 +874,7 @@ document.addEventListener("DOMContentLoaded", () => {
   async function loadTrackedGroups() {
     const listEl = document.getElementById("tracked-groups-list");
     try {
-      const res = await fetch("/api/groups");
+      const res = await apiFetch("/api/groups");
       const data = await res.json();
       const groups = data.groups || [];
 
@@ -623,7 +912,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!confirm(`Delete monitored group '${target}'?`)) return;
     triggerHaptic("heavy");
     try {
-      const res = await fetch(`/api/groups/${encodeURIComponent(target)}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/groups/${encodeURIComponent(target)}`, { method: "DELETE" });
       const data = await res.json();
       if (data.success) {
         showToast(`REMOVED GROUP ${target.toUpperCase()}`);
@@ -649,7 +938,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const title = document.getElementById("input-group-title").value.trim();
 
     try {
-      const res = await fetch("/api/groups", {
+      const res = await apiFetch("/api/groups", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target, title })
@@ -674,7 +963,7 @@ document.addEventListener("DOMContentLoaded", () => {
   async function loadAdminRecipients() {
     const listEl = document.getElementById("admin-recipients-list");
     try {
-      const res = await fetch("/api/admins");
+      const res = await apiFetch("/api/admins");
       const data = await res.json();
       const admins = data.admins || [];
 
@@ -708,7 +997,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!confirm(`Delete admin recipient '${target}'?`)) return;
     triggerHaptic("heavy");
     try {
-      const res = await fetch(`/api/admins/${encodeURIComponent(target)}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/admins/${encodeURIComponent(target)}`, { method: "DELETE" });
       const data = await res.json();
       if (data.success) {
         showToast(`REMOVED ADMIN ${target.toUpperCase()}`);
@@ -734,7 +1023,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const name = document.getElementById("input-admin-name").value.trim();
 
     try {
-      const res = await fetch("/api/admins", {
+      const res = await apiFetch("/api/admins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target, name })
@@ -765,7 +1054,6 @@ document.addEventListener("DOMContentLoaded", () => {
       .replace(/'/g, "&#039;");
   }
 
-  // Initial load
-  loadStreams();
-  loadLiveStatus();
+  // Start initialization and authentication check
+  initializeAuthentication();
 });

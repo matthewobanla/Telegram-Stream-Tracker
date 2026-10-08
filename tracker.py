@@ -986,40 +986,30 @@ def build_back_button(refresh_key=None):
     return [row]
 
 def is_user_authorized_admin(user_id, username=None):
-    """Checks whether a user is an authorized admin via Config or Database admin recipients (instant check)."""
-    if not user_id:
-        return False
-
-    uid_str = str(user_id).strip()
-    uname_clean = str(username).lower().lstrip("@") if username else ""
-
-    all_admins = get_all_admin_recipients()
-    admin_keys = [str(a).lower().lstrip("@") for a in all_admins]
-    return (uid_str in admin_keys) or bool(uname_clean and uname_clean in admin_keys)
+    """Checks whether a user is an authorized admin via Config, Database, or Auth engine."""
+    import auth
+    return auth.is_user_authorized(user_id, username)
 
 async def is_sender_admin_or_owner(event):
     """Verifies whether the sender is a Telegram group administrator/creator or a configured bot admin."""
-    if event.is_private:
-        return True
-
     sender_id = event.sender_id
     if not sender_id:
         return False
+
+    sender = await event.get_sender()
+    username = getattr(sender, "username", "")
+
+    # In private DM with the bot, strictly check if user is an authorized admin
+    if event.is_private:
+        return is_user_authorized_admin(sender_id, username)
 
     # Anonymous group admin posting as the group channel
     if sender_id == event.chat_id:
         return True
 
     # 1. Check if user is in bot's configured admin recipients / owner list
-    try:
-        sender = await event.get_sender()
-        username = getattr(sender, "username", "")
-        all_admins = get_all_admin_recipients()
-        admin_keys = [str(a).lower().lstrip("@") for a in all_admins]
-        if str(sender_id) in admin_keys or (username and username.lower() in admin_keys):
-            return True
-    except Exception:
-        pass
+    if is_user_authorized_admin(sender_id, username):
+        return True
 
     # 2. Check Telegram native group admin permissions
     try:
@@ -1327,19 +1317,23 @@ async def bot_callback_handler(event):
 # --- IN-TELEGRAM COMMAND & MEDIA HANDLERS ---
 @bot_client.on(events.NewMessage)
 async def bot_command_handler(event):
-    # Auto-enroll any DM user into admin recipients so all DM interactors receive reports
+    # Restrict private DM interactions strictly to authorized administrators
     if event.is_private:
-        try:
+        is_admin = await is_sender_admin_or_owner(event)
+        if not is_admin:
             sender = await event.get_sender()
-            if sender and not getattr(sender, "bot", False):
-                first = getattr(sender, "first_name", "") or ""
-                last = getattr(sender, "last_name", "") or ""
-                full_name = f"{first} {last}".strip() or f"User {event.sender_id}"
-                username = getattr(sender, "username", "")
-                target = f"@{username}" if username else str(event.chat_id)
-                db.add_admin_recipient(target, name=full_name, added_by="DM Interaction")
-        except Exception as ee:
-            print(f"[DM Auto-Enroll Notice] {ee}")
+            username = getattr(sender, "username", "")
+            print(f"[ACCESS DENIED] Unauthorized private message from Telegram ID {event.sender_id} (@{username})")
+            await safe_reply(
+                event,
+                f"⛔️ **Access Denied // Operator Authentication Required**\n\n"
+                f"• **Telegram User ID**: `{event.sender_id}`\n"
+                f"• **Username**: @{username or 'none'}\n\n"
+                f"You are not registered as an authorized administrator for this Stream Tracker.\n"
+                f"To request access, please send your Telegram User ID (`{event.sender_id}`) to the owner (@KingmattMO).",
+                parse_mode="markdown"
+            )
+            return
 
     # Check if incoming message is an Audio / Voice Note file (Transcriptions strictly in private DM)
     is_audio_file = event.voice or event.audio or (event.document and any(getattr(a, "voice", False) or getattr(a, "title", False) or "audio" in getattr(event.document, "mime_type", "") for a in getattr(event.document, "attributes", [])))
@@ -2024,6 +2018,12 @@ async def main():
 
     # 2. Start the Telegram Bot UI immediately so it is responsive to users right away
     await try_start_bot()
+    if bot_active:
+        try:
+            import dashboard_server
+            dashboard_server.set_bot_client(bot_client)
+        except Exception as bce:
+            print(f"[Auth OTP Notice] Bot client binding: {bce}")
 
     # 2. Load and seed target groups & admin recipients from Config / ENV
     config_targets = [t.strip() for t in str(TARGET_CHAT_ENV).split(",") if t.strip()]
