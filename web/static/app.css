@@ -39,6 +39,162 @@
   --shadow-lg: 0 12px 32px rgba(32, 30, 29, 0.22);
 }
 
+/* ==========================================================================
+   DARK THEME (Night Control Room / Radar Mode)
+   ========================================================================== */
+[data-theme="dark"], body.dark-theme {
+  --color-bg: #141312;
+  --color-surface: #1e1d1b;
+  --color-text: #f3f2f2;
+  --color-divider: rgba(243, 242, 242, 0.2);
+  --color-neutral-300: #383533;
+  --color-neutral-700: #9e9a97;
+  --color-neutral-800: #c2bebc;
+
+  --color-blue: #2575fc;
+  --color-blue-dark: #1a56b8;
+  --color-blue-tint: #14243b;
+
+  --color-yellow: #ffd200;
+  --color-yellow-dark: #e6bd00;
+  --color-yellow-tint: #38310c;
+
+  --color-red: #e04856;
+  --color-red-dark: #b82e3b;
+  --color-red-tint: #3b1619;
+
+  --color-green: #059635;
+  --color-green-tint: #0e3019;
+
+  --color-navy: #f3f2f2;
+
+  --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.7);
+}
+
+[data-theme="dark"] .nav-tab.active,
+[data-theme="dark"] .filter-btn.active,
+[data-theme="dark"] .subtab-btn.active {
+  background: #f3f2f2;
+  color: #141312;
+}
+
+[data-theme="dark"] .list-card:hover {
+  background: #252422;
+}
+
+[data-theme="dark"] .search-box input:focus {
+  background: #1e1d1b;
+}
+
+[data-theme="dark"] .radio-dot-box {
+  background: #141312;
+}
+
+[data-theme="dark"] .btn:hover {
+  background: #252422;
+}
+
+[data-theme="dark"] .btn-secondary {
+  background: #1e1d1b;
+}
+
+[data-theme="dark"] .modal-dialog {
+  background: #141312;
+}
+
+[data-theme="dark"] .text-viewer-box,
+[data-theme="dark"] .audio-box {
+  background: #1e1d1b;
+}
+
+[data-theme="dark"] .form-field input:focus {
+  background: #1e1d1b;
+}
+
+[data-theme="dark"] .toast {
+  background: #f3f2f2;
+  color: #141312;
+}
+
+/* System Dark Mode Fallback */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: #141312;
+    --color-surface: #1e1d1b;
+    --color-text: #f3f2f2;
+    --color-divider: rgba(243, 242, 242, 0.2);
+    --color-neutral-300: #383533;
+    --color-neutral-700: #9e9a97;
+    --color-neutral-800: #c2bebc;
+
+    --color-blue: #2575fc;
+    --color-blue-dark: #1a56b8;
+    --color-blue-tint: #14243b;
+
+    --color-yellow: #ffd200;
+    --color-yellow-dark: #e6bd00;
+    --color-yellow-tint: #38310c;
+
+    --color-red: #e04856;
+    --color-red-dark: #b82e3b;
+    --color-red-tint: #3b1619;
+
+    --color-green: #059635;
+    --color-green-tint: #0e3019;
+
+    --color-navy: #f3f2f2;
+
+    --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.7);
+  }
+
+  :root:not([data-theme="light"]) .nav-tab.active,
+  :root:not([data-theme="light"]) .filter-btn.active,
+  :root:not([data-theme="light"]) .subtab-btn.active {
+    background: #f3f2f2;
+    color: #141312;
+  }
+
+  :root:not([data-theme="light"]) .list-card:hover {
+    background: #252422;
+  }
+
+  :root:not([data-theme="light"]) .search-box input:focus {
+    background: #1e1d1b;
+  }
+
+  :root:not([data-theme="light"]) .radio-dot-box {
+    background: #141312;
+  }
+
+  :root:not([data-theme="light"]) .btn:hover {
+    background: #252422;
+  }
+
+  :root:not([data-theme="light"]) .btn-secondary {
+    background: #1e1d1b;
+  }
+
+  :root:not([data-theme="light"]) .modal-dialog {
+    background: #141312;
+  }
+
+  :root:not([data-theme="light"]) .text-viewer-box,
+  :root:not([data-theme="light"]) .audio-box {
+    background: #1e1d1b;
+  }
+
+  :root:not([data-theme="light"]) .form-field input:focus {
+    background: #1e1d1b;
+  }
+
+  :root:not([data-theme="light"]) .toast {
+    background: #f3f2f2;
+    color: #141312;
+  }
+}
+
 /* Base Reset */
 *, *::before, *::after {
   box-sizing: border-box;

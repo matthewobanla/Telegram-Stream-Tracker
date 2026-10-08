@@ -12,10 +12,6 @@ document.addEventListener("DOMContentLoaded", () => {
     if (tg.enableClosingConfirmation) {
       tg.enableClosingConfirmation();
     }
-    // Sync background to Modernist off-white (#f3f2f2)
-    if (tg.setHeaderColor) tg.setHeaderColor("#f3f2f2");
-    if (tg.setBackgroundColor) tg.setBackgroundColor("#f3f2f2");
-
     const user = tg.initDataUnsafe?.user;
     if (user?.first_name) {
       const greetingEl = document.getElementById("user-greeting");
@@ -24,6 +20,81 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
   }
+
+  // --- THEME MANAGEMENT (MODERNIST CONTROL ROOM DARK / LIGHT) ---
+  function getPreferredTheme() {
+    const saved = localStorage.getItem("tracker_theme");
+    if (saved === "dark" || saved === "light") return saved;
+    if (tg && (tg.colorScheme === "dark" || tg.colorScheme === "light")) {
+      return tg.colorScheme;
+    }
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      return "dark";
+    }
+    return "light";
+  }
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    document.body.classList.toggle("dark-theme", theme === "dark");
+
+    const headerColor = (theme === "dark") ? "#141312" : "#f3f2f2";
+    if (tg) {
+      try {
+        if (typeof tg.setHeaderColor === "function") tg.setHeaderColor(headerColor);
+        if (typeof tg.setBackgroundColor === "function") tg.setBackgroundColor(headerColor);
+      } catch (err) {
+        console.warn("Telegram color sync error:", err);
+      }
+    }
+
+    const toggleBtn = document.getElementById("btn-theme-toggle");
+    if (toggleBtn) {
+      toggleBtn.textContent = theme === "dark" ? "☼" : "◐";
+      toggleBtn.title = theme === "dark" ? "SWITCH TO LIGHT MODE" : "SWITCH TO DARK MODE";
+      toggleBtn.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+    }
+  }
+
+  function toggleTheme() {
+    triggerHaptic("medium");
+    const current = document.documentElement.getAttribute("data-theme") || getPreferredTheme();
+    const nextTheme = current === "dark" ? "light" : "dark";
+    localStorage.setItem("tracker_theme", nextTheme);
+    applyTheme(nextTheme);
+    showToast(`THEME: ${nextTheme.toUpperCase()} MODE`);
+  }
+
+  // Initialize theme on load
+  const initialTheme = getPreferredTheme();
+  applyTheme(initialTheme);
+
+  // Sync with Telegram theme changes if operator hasn't explicitly overridden it
+  if (tg && typeof tg.onEvent === "function") {
+    try {
+      tg.onEvent("themeChanged", () => {
+        if (!localStorage.getItem("tracker_theme")) {
+          applyTheme(tg.colorScheme || "light");
+        }
+      });
+    } catch (e) {
+      console.warn("Theme event listener error:", e);
+    }
+  }
+
+  document.getElementById("btn-theme-toggle")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    toggleTheme();
+  });
+
+  document.getElementById("btn-refresh")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    triggerHaptic("light");
+    showToast("SYNCING TELEMETRY...");
+    loadStreams();
+    loadLiveStatus();
+    loadSettingsData();
+  });
 
   function triggerHaptic(type = "light") {
     try {
