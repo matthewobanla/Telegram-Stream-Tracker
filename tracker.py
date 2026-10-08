@@ -1958,6 +1958,8 @@ async def try_start_bot():
             await bot_client.start(bot_token=BOT_TOKEN)
         bot_me = await bot_client.get_me()
         bot_active = True
+        if bot_me and getattr(bot_me, "username", None):
+            os.environ["BOT_USERNAME"] = bot_me.username
         print(f"[UI Bot Online]  : @{bot_me.username} ({bot_me.first_name})")
         asyncio.create_task(register_bot_commands())
         asyncio.create_task(sync_bot_dialogs())

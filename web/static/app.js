@@ -355,8 +355,73 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  function mountTelegramLoginWidget(botUsername) {
+    if (!botUsername) return;
+    const wrapper = document.getElementById("telegram-widget-wrapper");
+    const divider = document.getElementById("widget-divider");
+    const container = document.getElementById("telegram-login-widget-container");
+    if (!container) return;
+
+    wrapper?.classList.remove("hidden");
+    divider?.classList.remove("hidden");
+    container.innerHTML = "";
+
+    window.onTelegramAuth = async function(user) {
+      triggerHaptic("heavy");
+      showToast("VERIFYING TELEGRAM SIGNATURE...");
+      try {
+        const res = await fetch("/api/auth/telegram-widget", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auth_data: user })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          authToken = data.token;
+          localStorage.setItem("tracker_auth_token", authToken);
+          currentAuthUser = data.user;
+          const greetingEl = document.getElementById("user-greeting");
+          if (greetingEl) {
+            greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} (@${data.user.username}) // TELEMETRY ACTIVE`;
+          }
+          hideAuthGate();
+          showToast(`AUTHENTICATED: @${data.user.username}`);
+          loadStreams();
+          loadLiveStatus();
+        } else {
+          showAuthAlert(data.message || data.error || "TELEGRAM AUTHENTICATION REJECTED");
+        }
+      } catch (err) {
+        showAuthAlert("FAILED TO CONNECT TO SERVER FOR TELEGRAM LOGIN");
+      }
+    };
+
+    const script = document.createElement("script");
+    script.src = "https://telegram.org/js/telegram-widget.js?22";
+    script.setAttribute("data-telegram-login", botUsername);
+    script.setAttribute("data-size", "large");
+    script.setAttribute("data-radius", "0");
+    script.setAttribute("data-onauth", "onTelegramAuth(user)");
+    script.setAttribute("data-request-access", "write");
+    script.async = true;
+    container.appendChild(script);
+  }
+
   // Master Startup Authentication Routine
   async function initializeAuthentication() {
+    // 0. Load public auth config (such as bot username for the Telegram Widget)
+    try {
+      const cfgRes = await fetch("/api/auth/config");
+      if (cfgRes.ok) {
+        const cfg = await cfgRes.json();
+        if (cfg.bot_username) {
+          mountTelegramLoginWidget(cfg.bot_username);
+        }
+      }
+    } catch (e) {
+      console.warn("Auth config fetch notice:", e);
+    }
+
     // 1. If running inside Telegram Mini App, use cryptographic initData signature
     if (tg && tg.initData) {
       try {

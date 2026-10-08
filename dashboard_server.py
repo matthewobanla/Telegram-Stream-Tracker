@@ -176,6 +176,57 @@ async def api_auth_webapp(request):
     except Exception as e:
         return json_response({"error": str(e)}, status=500)
 
+async def api_auth_widget(request):
+    """Authenticates direct Telegram Login Widget payload."""
+    try:
+        data = await request.json()
+        auth_data = data.get("auth_data", {})
+        if not auth_data:
+            return json_response({"error": "Missing Telegram auth_data"}, status=400)
+
+        verified, err = auth.validate_telegram_login_widget(auth_data)
+        if not verified:
+            return json_response({"error": f"Invalid Telegram authentication: {err}"}, status=401)
+
+        user_id = verified.get("id")
+        username = verified.get("username", "")
+        first_name = verified.get("first_name", "")
+        last_name = verified.get("last_name", "")
+        full_name = f"{first_name} {last_name}".strip() or f"User {user_id}"
+
+        if not auth.is_user_authorized(user_id, username):
+            return json_response({
+                "error": "ACCESS_DENIED",
+                "message": f"Telegram user @{username or 'no_user'} (ID: {user_id}) is not an authorized administrator.",
+                "telegram_id": user_id,
+                "username": username
+            }, status=403)
+
+        token = auth.create_session(user_id, username=username, name=full_name, auth_type="telegram_widget")
+        resp = json_response({
+            "success": True,
+            "token": token,
+            "user": {
+                "id": user_id,
+                "username": username,
+                "name": full_name,
+                "photo_url": verified.get("photo_url", ""),
+                "auth_type": "telegram_widget"
+            }
+        })
+        resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
+        return resp
+    except Exception as e:
+        return json_response({"error": str(e)}, status=500)
+
+async def api_auth_config(request):
+    """Returns public auth metadata (such as bot username for the Telegram Widget)."""
+    bot_name = os.getenv("BOT_USERNAME", "").strip().lstrip("@")
+    return json_response({
+        "bot_username": bot_name,
+        "has_passkey": bool(auth.get_admin_passkey())
+    })
+
 async def api_auth_request_otp(request):
     """Sends a 6-digit OTP code directly to user's Telegram DM via the bot."""
     try:
@@ -629,7 +680,9 @@ def create_app():
     app.router.add_get("/api/status", api_status)
 
     # Auth Endpoints
+    app.router.add_get("/api/auth/config", api_auth_config)
     app.router.add_post("/api/auth/telegram-webapp", api_auth_webapp)
+    app.router.add_post("/api/auth/telegram-widget", api_auth_widget)
     app.router.add_post("/api/auth/request-otp", api_auth_request_otp)
     app.router.add_post("/api/auth/verify-otp", api_auth_verify_otp)
     app.router.add_post("/api/auth/login-passkey", api_auth_login_passkey)

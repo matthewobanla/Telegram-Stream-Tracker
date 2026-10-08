@@ -163,6 +163,47 @@ def validate_telegram_init_data(init_data_raw, bot_token=None):
     except Exception as e:
         return None, f"InitData validation error: {e}"
 
+# --- Direct Telegram Login Widget Validation ---
+
+def validate_telegram_login_widget(auth_data, bot_token=None):
+    """
+    Validates data received directly from the official Telegram Login Widget (data-telegram-login).
+    auth_data dict contains: id, first_name, username, auth_date, hash, etc.
+    Algorithm per https://core.telegram.org/widgets/login#checking-authorization:
+      secret_key = SHA256(bot_token)
+      data_check_string = sorted key=value pairs (excluding hash) joined by \n
+      hash = HMAC-SHA256(data_check_string, secret_key)
+    """
+    if not auth_data or not isinstance(auth_data, dict):
+        return None, "Missing authentication payload"
+
+    received_hash = auth_data.get("hash")
+    if not received_hash:
+        return None, "Missing cryptographic hash in Telegram payload"
+
+    token = (bot_token or get_bot_token()).strip()
+    if not token:
+        return None, "Bot token not configured on server"
+
+    try:
+        check_dict = {str(k): str(v) for k, v in auth_data.items() if k != "hash" and v is not None}
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(check_dict.items()))
+
+        secret_key = hashlib.sha256(token.encode("utf-8")).digest()
+        calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(calculated_hash, received_hash):
+            return None, "Invalid cryptographic Telegram signature"
+
+        auth_date = int(auth_data.get("auth_date", 0))
+        now = int(time.time())
+        if auth_date and (now - auth_date > 86400):
+            return None, "Telegram login session has expired. Please log in again."
+
+        return check_dict, None
+    except Exception as e:
+        return None, f"Telegram login verification error: {e}"
+
 # --- Session Token Management ---
 
 def create_session(user_id, username="", name="", auth_type="webapp"):

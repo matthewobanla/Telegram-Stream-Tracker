@@ -364,9 +364,24 @@
 
           <div id="auth-alert" class="status-banner banner-red hidden" style="margin-bottom: 12px; font-size: 11px; padding: 8px 10px; line-height: 1.4;"></div>
 
+          <!-- DIRECT TELEGRAM AUTHENTICATION WIDGET (1-CLICK) -->
+          <div id="telegram-widget-wrapper" class="hidden" style="margin-bottom: 14px; text-align: center; padding: 12px; background: var(--color-surface); border: 2px solid var(--color-divider);">
+            <div style="font-size: 11px; font-weight: 800; letter-spacing: 0.05em; color: var(--color-neutral-700); margin-bottom: 8px;">
+              DIRECT TELEGRAM AUTHENTICATION (1-CLICK)
+            </div>
+            <div id="telegram-login-widget-container" style="display: flex; justify-content: center; min-height: 40px; align-items: center;"></div>
+            <div style="margin-top: 6px; font-size: 10px; color: var(--color-neutral-700);">Identifies your verified Telegram username & ID instantly</div>
+          </div>
+
+          <div id="widget-divider" class="hidden" style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+            <div style="flex: 1; height: 1px; background: var(--color-divider);"></div>
+            <span style="font-size: 10px; font-weight: 800; color: var(--color-neutral-700);">OR ALTERNATIVE METHODS</span>
+            <div style="flex: 1; height: 1px; background: var(--color-divider);"></div>
+          </div>
+
           <!-- Auth Mode Tabs -->
           <div class="filter-strip" style="margin-bottom: 12px; display: flex;">
-            <button type="button" id="tab-auth-otp" class="filter-btn active" style="flex:1;">TELEGRAM ID</button>
+            <button type="button" id="tab-auth-otp" class="filter-btn active" style="flex:1;">TELEGRAM BOT OTP</button>
             <button type="button" id="tab-auth-key" class="filter-btn" style="flex:1;">PASSKEY</button>
           </div>
 
