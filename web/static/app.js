@@ -117,6 +117,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- AUTHENTICATION STATE & LOGIC ---
   let authToken = localStorage.getItem("tracker_auth_token") || "";
+  let deviceToken = localStorage.getItem("tracker_device_token") || "";
   let currentAuthUser = null;
   let activeOtpTarget = "";
 
@@ -155,6 +156,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (authToken) {
       headers["Authorization"] = `Bearer ${authToken}`;
     }
+    if (deviceToken) {
+      headers["X-Device-Token"] = deviceToken;
+    }
     if (tg && tg.initData) {
       headers["X-Telegram-Init-Data"] = tg.initData;
     }
@@ -162,7 +166,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const res = await fetch(url, options);
     if (res.status === 401 && !url.includes("/api/auth/")) {
-      showAuthGate("AUTHENTICATION REQUIRED // OPERATOR SESSION EXPIRED");
+      lockControlRoom("OPERATOR SESSION EXPIRED // SECURITY LOCK");
     }
     return res;
   }
@@ -267,13 +271,14 @@ document.addEventListener("DOMContentLoaded", () => {
       if (res.ok && data.success) {
         authToken = data.token;
         localStorage.setItem("tracker_auth_token", authToken);
-        currentAuthUser = data.user;
-
-        const greetingEl = document.getElementById("user-greeting");
-        if (greetingEl) {
-          greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} // TELEMETRY ACTIVE`;
+        if (data.device_token) {
+          deviceToken = data.device_token;
+          localStorage.setItem("tracker_device_token", deviceToken);
         }
+        currentAuthUser = data.user;
+        localStorage.setItem("tracker_operator", JSON.stringify(currentAuthUser));
 
+        updateOperatorGreeting(currentAuthUser);
         hideAuthGate();
         showToast("OPERATOR AUTHENTICATED");
         loadStreams();
@@ -313,13 +318,14 @@ document.addEventListener("DOMContentLoaded", () => {
       if (res.ok && data.success) {
         authToken = data.token;
         localStorage.setItem("tracker_auth_token", authToken);
-        currentAuthUser = data.user;
-
-        const greetingEl = document.getElementById("user-greeting");
-        if (greetingEl) {
-          greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} // TELEMETRY ACTIVE`;
+        if (data.device_token) {
+          deviceToken = data.device_token;
+          localStorage.setItem("tracker_device_token", deviceToken);
         }
+        currentAuthUser = data.user;
+        localStorage.setItem("tracker_operator", JSON.stringify(currentAuthUser));
 
+        updateOperatorGreeting(currentAuthUser);
         hideAuthGate();
         showToast("OPERATOR PASSKEY ACCEPTED");
         loadStreams();
@@ -335,28 +341,46 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Header Lock / Logout Button
-  btnAuthLock?.addEventListener("click", async () => {
+  // Header Lock Button (Instant Lock without forgetting credentials)
+  btnAuthLock?.addEventListener("click", () => {
     triggerHaptic("medium");
     if (!authGate.classList.contains("hidden")) {
       return; // Already locked
     }
-
-    if (confirm("Lock Control Room and end current operator session?")) {
-      try {
-        await apiFetch("/api/auth/logout", { method: "POST" });
-      } catch (e) {}
-
-      authToken = "";
-      localStorage.removeItem("tracker_auth_token");
-      currentAuthUser = null;
-      showToast("CONTROL ROOM LOCKED");
-      showAuthGate();
-    }
+    lockControlRoom();
+    showToast("CONTROL ROOM LOCKED");
   });
 
-  // Pending Operator Identity (before user taps Authorize)
+  // Pending Operator Identity (before user taps Authorize / Unlock)
   let pendingIdentity = null;
+
+  function lockControlRoom(message = null) {
+    let op = currentAuthUser || pendingIdentity;
+    if (!op) {
+      const saved = localStorage.getItem("tracker_operator");
+      if (saved) {
+        try { op = JSON.parse(saved); } catch (e) {}
+      }
+    }
+    if (!op && tg && tg.initDataUnsafe?.user) {
+      const u = tg.initDataUnsafe.user;
+      op = {
+        id: String(u.id),
+        username: u.username || "",
+        name: `${u.first_name || ""} ${u.last_name || ""}`.trim() || `User ${u.id}`,
+        authorized: true
+      };
+    }
+
+    if (op) {
+      pendingIdentity = op;
+      renderDetectedOperatorCard(op, true /* isReunlock */);
+    } else {
+      showManualLoginGate();
+    }
+
+    showAuthGate(message);
+  }
 
   function updateOperatorGreeting(user) {
     const greetingEl = document.getElementById("user-greeting");
@@ -366,7 +390,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  function renderDetectedOperatorCard(identity) {
+  function renderDetectedOperatorCard(identity, isReunlock = false) {
     const sectionDetected = document.getElementById("auth-section-detected");
     const sectionManual = document.getElementById("auth-section-manual");
     const nameEl = document.getElementById("detected-user-name");
@@ -402,7 +426,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (btnAuthorize) {
         btnAuthorize.disabled = false;
-        btnAuthorize.textContent = "⚡️ AUTHORIZE & ENTER CONTROL ROOM";
+        btnAuthorize.textContent = isReunlock ? "⚡️ UNLOCK CONTROL ROOM" : "⚡️ AUTHORIZE & ENTER CONTROL ROOM";
       }
       if (authAlert) authAlert.classList.add("hidden");
     }
@@ -419,24 +443,35 @@ document.addEventListener("DOMContentLoaded", () => {
     showAuthGate();
   }
 
-  // Switch between detected card and manual forms
-  document.getElementById("btn-switch-manual")?.addEventListener("click", () => {
+  // Switch operator or log out completely
+  document.getElementById("btn-switch-manual")?.addEventListener("click", async () => {
     triggerHaptic("selection");
-    showManualLoginGate();
+    if (confirm("Log out completely and remove saved operator credentials from this device?")) {
+      try { await apiFetch("/api/auth/logout", { method: "POST" }); } catch (e) {}
+      authToken = "";
+      deviceToken = "";
+      currentAuthUser = null;
+      pendingIdentity = null;
+      localStorage.removeItem("tracker_auth_token");
+      localStorage.removeItem("tracker_device_token");
+      localStorage.removeItem("tracker_operator");
+      showToast("OPERATOR LOGGED OUT");
+      showManualLoginGate();
+    }
   });
 
   document.getElementById("btn-return-detected")?.addEventListener("click", () => {
     triggerHaptic("selection");
-    if (pendingIdentity) renderDetectedOperatorCard(pendingIdentity);
+    if (pendingIdentity) renderDetectedOperatorCard(pendingIdentity, true);
   });
 
-  // Tapping [⚡️ AUTHORIZE & ENTER CONTROL ROOM]
+  // Tapping [⚡️ UNLOCK CONTROL ROOM] or [⚡️ AUTHORIZE & ENTER CONTROL ROOM]
   document.getElementById("btn-confirm-authorize")?.addEventListener("click", async () => {
     triggerHaptic("heavy");
     const btn = document.getElementById("btn-confirm-authorize");
     if (btn) {
       btn.disabled = true;
-      btn.textContent = "AUTHORIZING OPERATOR...";
+      btn.textContent = "UNLOCKING CONTROL ROOM...";
     }
 
     try {
@@ -447,8 +482,11 @@ document.addEventListener("DOMContentLoaded", () => {
       if (tg && tg.initData) {
         payload.initData = tg.initData;
       }
+      if (deviceToken) {
+        payload.device_token = deviceToken;
+      }
 
-      const res = await fetch("/api/auth/authorize", {
+      const res = await apiFetch("/api/auth/authorize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -458,11 +496,16 @@ document.addEventListener("DOMContentLoaded", () => {
       if (res.ok && data.success) {
         authToken = data.token;
         localStorage.setItem("tracker_auth_token", authToken);
+        if (data.device_token) {
+          deviceToken = data.device_token;
+          localStorage.setItem("tracker_device_token", deviceToken);
+        }
         currentAuthUser = data.user;
+        localStorage.setItem("tracker_operator", JSON.stringify(currentAuthUser));
 
         updateOperatorGreeting(currentAuthUser);
         hideAuthGate();
-        showToast(`WELCOME OPERATOR ${currentAuthUser.name.toUpperCase()}`);
+        showToast(`CONTROL ROOM UNLOCKED // ${currentAuthUser.name.toUpperCase()}`);
 
         if (window.history && window.history.replaceState) {
           window.history.replaceState({}, document.title, window.location.pathname);
@@ -478,12 +521,12 @@ document.addEventListener("DOMContentLoaded", () => {
     } finally {
       if (btn) {
         btn.disabled = false;
-        btn.textContent = "⚡️ AUTHORIZE & ENTER CONTROL ROOM";
+        btn.textContent = "⚡️ UNLOCK CONTROL ROOM";
       }
     }
   });
 
-  // Master Startup Authentication Routine
+  // Master Startup Authentication Routine (Dashboard locked by default on load)
   async function initializeAuthentication() {
     // 1. Check URL query string for ?auth=... launch token from bot
     const urlParams = new URLSearchParams(window.location.search);
@@ -495,24 +538,15 @@ document.addEventListener("DOMContentLoaded", () => {
       if (inspectRes.ok) {
         const inspectData = await inspectRes.json();
 
-        // If session is already active
-        if (inspectData.state === "authenticated") {
-          currentAuthUser = inspectData.user;
-          updateOperatorGreeting(currentAuthUser);
-          hideAuthGate();
-          loadStreams();
-          loadLiveStatus();
-          return;
-        }
-
-        // If operator identity is detected (via launch token or Telegram WebApp)
+        // If operator identity is detected (via launch token, device token, initData, or active session)
         if (inspectData.detected && inspectData.user) {
           pendingIdentity = {
             ...inspectData.user,
             launch_token: launchToken || inspectData.launch_token,
             authorized: inspectData.authorized
           };
-          renderDetectedOperatorCard(pendingIdentity);
+          // Locked by default on load, 1-tap unlock card ready
+          renderDetectedOperatorCard(pendingIdentity, true);
           showAuthGate();
           return;
         }
@@ -530,12 +564,23 @@ document.addEventListener("DOMContentLoaded", () => {
         name: `${u.first_name || ""} ${u.last_name || ""}`.trim() || `User ${u.id}`,
         authorized: true
       };
-      renderDetectedOperatorCard(pendingIdentity);
+      renderDetectedOperatorCard(pendingIdentity, true);
       showAuthGate();
       return;
     }
 
-    // 3. Fallback: External browser without detected Telegram account
+    // 3. Saved operator profile in localStorage
+    const savedOp = localStorage.getItem("tracker_operator");
+    if (savedOp) {
+      try {
+        pendingIdentity = JSON.parse(savedOp);
+        renderDetectedOperatorCard(pendingIdentity, true);
+        showAuthGate();
+        return;
+      } catch (e) {}
+    }
+
+    // 4. Fallback: External browser without detected Telegram account
     showManualLoginGate();
   }
 

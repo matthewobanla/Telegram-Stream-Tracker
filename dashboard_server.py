@@ -228,22 +228,8 @@ async def api_auth_config(request):
     })
 
 async def api_auth_inspect(request):
-    """Inspects pending identity from launch token or WebApp initData without unlocking yet."""
-    # 1. Check existing active session
-    sess = await get_request_session(request)
-    if sess:
-        return json_response({
-            "detected": True,
-            "authorized": True,
-            "user": {
-                "id": sess.get("user_id"),
-                "username": sess.get("username"),
-                "name": sess.get("name"),
-            },
-            "state": "authenticated"
-        })
-
-    # 2. Check launch token in query (?auth=...)
+    """Inspects pending identity from launch token, WebApp initData, device token, or session."""
+    # 1. Check launch token in query (?auth=...)
     launch_token = request.query.get("auth", "").strip()
     if launch_token:
         record = auth.verify_launch_token(launch_token)
@@ -261,10 +247,11 @@ async def api_auth_inspect(request):
                 },
                 "launch_token": launch_token,
                 "method": "bot_launch",
+                "can_unlock": is_auth,
                 "state": "pending_authorization"
             })
 
-    # 3. Check X-Telegram-Init-Data header
+    # 2. Check X-Telegram-Init-Data header
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     if init_data:
         user_data, _ = auth.validate_telegram_init_data(init_data)
@@ -282,17 +269,60 @@ async def api_auth_inspect(request):
                     "name": name,
                 },
                 "method": "telegram_webapp",
+                "can_unlock": is_auth,
                 "state": "pending_authorization"
             })
 
-    return json_response({"detected": False, "state": "anonymous"})
+    # 3. Check X-Device-Token header (persistent device authorization)
+    device_token = request.headers.get("X-Device-Token", "").strip()
+    if device_token:
+        dev_data = auth.verify_device_token(device_token)
+        if dev_data:
+            user_id = dev_data.get("user_id")
+            username = dev_data.get("username", "")
+            name = dev_data.get("name", f"User {user_id}")
+            is_auth = auth.is_user_authorized(user_id, username)
+            return json_response({
+                "detected": True,
+                "authorized": is_auth,
+                "user": {
+                    "id": user_id,
+                    "username": username,
+                    "name": name,
+                },
+                "method": "device_token",
+                "can_unlock": is_auth,
+                "state": "pending_authorization"
+            })
+
+    # 4. Check existing active session
+    sess = await get_request_session(request)
+    if sess:
+        user_id = sess.get("user_id")
+        username = sess.get("username")
+        is_auth = auth.is_user_authorized(user_id, username)
+        return json_response({
+            "detected": True,
+            "authorized": is_auth,
+            "user": {
+                "id": user_id,
+                "username": username,
+                "name": sess.get("name"),
+            },
+            "method": "session",
+            "can_unlock": is_auth,
+            "state": "pending_authorization"
+        })
+
+    return json_response({"detected": False, "state": "anonymous", "can_unlock": False})
 
 async def api_auth_authorize(request):
-    """Confirms user tap on [AUTHORIZE & ENTER CONTROL ROOM]. Creates session & cookie."""
+    """Confirms user tap on [AUTHORIZE & ENTER CONTROL ROOM] or [UNLOCK CONTROL ROOM]. Creates session & cookie."""
     try:
         data = await request.json()
         launch_token = data.get("launch_token", "").strip()
         init_data = data.get("initData", "").strip()
+        device_token = (data.get("device_token") or request.headers.get("X-Device-Token", "")).strip()
 
         # A: Authorize via bot launch token
         if launch_token:
@@ -308,9 +338,11 @@ async def api_auth_authorize(request):
                 return json_response({"error": "ACCESS_DENIED", "message": f"User {user_id} (@{username}) is not authorized."}, status=403)
 
             token = auth.consume_launch_token(launch_token)
+            fresh_device_token = auth.generate_device_token(user_id, username, name)
             resp = json_response({
                 "success": True,
                 "token": token,
+                "device_token": fresh_device_token,
                 "user": { "id": user_id, "username": username, "name": name, "auth_type": "bot_launch" }
             })
             resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
@@ -330,15 +362,55 @@ async def api_auth_authorize(request):
                 return json_response({"error": "ACCESS_DENIED", "message": f"User {user_id} (@{username}) is not authorized."}, status=403)
 
             token = auth.create_session(user_id, username=username, name=name, auth_type="webapp")
+            fresh_device_token = auth.generate_device_token(user_id, username, name)
             resp = json_response({
                 "success": True,
                 "token": token,
+                "device_token": fresh_device_token,
                 "user": { "id": user_id, "username": username, "name": name, "auth_type": "webapp" }
             })
             resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
             return resp
 
-        return json_response({"error": "Missing authorization token or initData"}, status=400)
+        # C: Authorize via persistent Device Token
+        if device_token:
+            dev_data = auth.verify_device_token(device_token)
+            if not dev_data:
+                return json_response({"error": "Device token has expired. Please launch from Telegram bot again."}, status=401)
+
+            user_id = dev_data["user_id"]
+            username = dev_data.get("username", "")
+            name = dev_data.get("name", "")
+
+            if not auth.is_user_authorized(user_id, username):
+                return json_response({"error": "ACCESS_DENIED", "message": f"User {user_id} (@{username}) is not authorized."}, status=403)
+
+            token = auth.create_session(user_id, username=username, name=name, auth_type="device_reauth")
+            fresh_device_token = auth.generate_device_token(user_id, username, name)
+            resp = json_response({
+                "success": True,
+                "token": token,
+                "device_token": fresh_device_token,
+                "user": { "id": user_id, "username": username, "name": name, "auth_type": "device_reauth" }
+            })
+            resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
+            return resp
+
+        # D: Authorize via active session (unlock locked screen)
+        sess = await get_request_session(request)
+        if sess:
+            user_id = sess["user_id"]
+            username = sess.get("username", "")
+            name = sess.get("name", "")
+            fresh_device_token = auth.generate_device_token(user_id, username, name)
+            return json_response({
+                "success": True,
+                "token": request.headers.get("Authorization", "").replace("Bearer ", "").strip() or request.cookies.get("tracker_session", ""),
+                "device_token": fresh_device_token,
+                "user": { "id": user_id, "username": username, "name": name, "auth_type": "session_unlock" }
+            })
+
+        return json_response({"error": "Missing authorization credentials (launch token, initData, or device token)"}, status=400)
     except Exception as e:
         return json_response({"error": str(e)}, status=500)
 
@@ -388,9 +460,11 @@ async def api_auth_verify_otp(request):
             return json_response({"error": msg}, status=401)
 
         token = auth.create_session(user_id=target, username=target, name=f"Admin {target}", auth_type="otp")
+        dev_token = auth.generate_device_token(target, username=target, name=f"Admin {target}")
         resp = json_response({
             "success": True,
             "token": token,
+            "device_token": dev_token,
             "user": {
                 "id": target,
                 "name": f"Operator {target}",
@@ -416,9 +490,11 @@ async def api_auth_login_passkey(request):
             return json_response({"error": "Invalid master passkey"}, status=401)
 
         token = auth.create_session(user_id="master_admin", username="owner", name="Master Operator", auth_type="passkey")
+        dev_token = auth.generate_device_token("master_admin", username="owner", name="Master Operator")
         resp = json_response({
             "success": True,
             "token": token,
+            "device_token": dev_token,
             "user": {
                 "id": "master_admin",
                 "name": "Master Operator",

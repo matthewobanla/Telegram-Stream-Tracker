@@ -15,6 +15,7 @@ import json
 import time
 import secrets
 import datetime
+import base64
 from urllib.parse import parse_qsl
 
 import db
@@ -280,6 +281,68 @@ def destroy_session(token):
     """Revokes an active session token."""
     if token in ACTIVE_SESSIONS:
         del ACTIVE_SESSIONS[token]
+
+def get_signing_key():
+    token = get_bot_token()
+    if token:
+        return token.encode("utf-8")
+    api_hash = getattr(config, "API_HASH", "")
+    if api_hash:
+        return str(api_hash).encode("utf-8")
+    return b"tracker_operator_signature_key_fallback_2026"
+
+def generate_device_token(user_id, username="", name=""):
+    """
+    Generates a secure HMAC-SHA256 device token (valid 30 days).
+    Persists across server restarts and allows seamless 1-tap re-unlock.
+    """
+    key = get_signing_key()
+    payload = {
+        "uid": str(user_id),
+        "u": str(username or "").lstrip("@"),
+        "n": str(name or f"User {user_id}"),
+        "exp": int(time.time() + 30 * 86400)
+    }
+    payload_str = json.dumps(payload, separators=(',', ':'))
+    payload_b64 = base64.urlsafe_b64encode(payload_str.encode('utf-8')).decode('ascii').rstrip('=')
+    sig = hmac.new(key, payload_b64.encode('ascii'), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+def verify_device_token(token_str):
+    """
+    Verifies the HMAC-SHA256 signature and expiration of a device token.
+    Returns dict { 'user_id', 'username', 'name' } or None.
+    """
+    if not token_str or not isinstance(token_str, str) or "." not in token_str:
+        return None
+    try:
+        parts = token_str.split(".", 1)
+        if len(parts) != 2:
+            return None
+        payload_b64, sig = parts
+        key = get_signing_key()
+        expected_sig = hmac.new(key, payload_b64.encode('ascii'), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected_sig, sig):
+            return None
+
+        pad = len(payload_b64) % 4
+        if pad:
+            payload_b64 += "=" * (4 - pad)
+
+        payload_json = base64.urlsafe_b64decode(payload_b64.encode('ascii')).decode('utf-8')
+        data = json.loads(payload_json)
+
+        if time.time() > data.get("exp", 0):
+            return None
+
+        return {
+            "user_id": str(data["uid"]),
+            "username": data.get("u", ""),
+            "name": data.get("n", f"User {data['uid']}")
+        }
+    except Exception:
+        return None
+
 
 # --- Telegram OTP Generation & Verification ---
 
