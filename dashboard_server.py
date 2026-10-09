@@ -38,8 +38,8 @@ def json_response(data, status=200):
     return web.json_response(data, status=status, dumps=lambda obj: json.dumps(obj, default=str))
 
 async def get_request_session(request):
-    """Extracts and verifies session from cookies, Bearer header, or Telegram initData."""
-    # 1. Bearer Token
+    """Extracts and verifies session from Authorization header, query token, cookies, device token, or Telegram initData."""
+    # 1. Bearer Token (Authorization: Bearer <token>)
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
@@ -47,15 +47,33 @@ async def get_request_session(request):
         if sess:
             return sess
 
-    # 2. Cookie
+    # 2. Query parameter token (?token=<token>)
+    query_token = request.query.get("token", "").strip()
+    if query_token:
+        sess = auth.verify_session(query_token)
+        if sess:
+            return sess
+
+    # 3. Cookie (tracker_session)
     cookie_token = request.cookies.get("tracker_session")
     if cookie_token:
         sess = auth.verify_session(cookie_token)
         if sess:
             return sess
 
-    # 3. Direct Telegram initData header (for seamless WebApp requests)
-    init_data = request.headers.get("X-Telegram-Init-Data")
+    # 4. Device Token (Header X-Device-Token or Query device_token)
+    device_token = request.headers.get("X-Device-Token", "").strip() or request.query.get("device_token", "").strip()
+    if device_token:
+        dev_data = auth.verify_device_token(device_token)
+        if dev_data:
+            uid = dev_data.get("user_id")
+            uname = dev_data.get("username", "")
+            if auth.is_user_authorized(uid, uname):
+                token = auth.create_session(uid, uname, dev_data.get("name", ""), auth_type="device_token")
+                return auth.verify_session(token)
+
+    # 5. Direct Telegram initData header or query (for seamless WebApp requests)
+    init_data = request.headers.get("X-Telegram-Init-Data", "").strip() or request.query.get("initData", "").strip()
     if init_data:
         user_data, _ = auth.validate_telegram_init_data(init_data)
         if user_data:
@@ -703,15 +721,53 @@ async def api_stream_csv(request):
     try:
         csv_path, stream_meta = db.get_or_generate_csv_for_stream(stream_id)
         if not csv_path or not os.path.exists(csv_path):
-            return web.Response(text="CSV report could not be generated", status=404)
+            return json_response({"error": "CSV report could not be generated for this session"}, status=404)
 
         filename = os.path.basename(csv_path)
-        return web.FileResponse(
-            csv_path,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+
+        with open(csv_path, "rb") as f:
+            csv_bytes = f.read()
+
+        return web.Response(
+            body=csv_bytes,
+            content_type="text/csv",
+            charset="utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Access-Control-Expose-Headers": "Content-Disposition",
+                "Cache-Control": "no-cache"
+            }
         )
     except Exception as e:
         return json_response({"error": str(e)}, status=500)
+
+async def api_stream_send_csv(request):
+    """Sends the CSV spreadsheet directly to the user's Telegram DM via the bot."""
+    stream_id = request.match_info.get("stream_id")
+    sess = request.get("session") or await get_request_session(request)
+    if not sess:
+        return json_response({"error": "Unauthorized"}, status=401)
+
+    user_id = sess.get("user_id")
+    if not user_id:
+        return json_response({"error": "Telegram User ID not identified"}, status=400)
+
+    csv_path, stream_meta = db.get_or_generate_csv_for_stream(stream_id)
+    if not csv_path or not os.path.exists(csv_path):
+        return json_response({"error": "CSV file not found"}, status=404)
+
+    bot_client = auth.get_bot_client()
+    if not bot_client:
+        return json_response({"error": "Bot client unavailable"}, status=503)
+
+    try:
+        target = int(user_id) if str(user_id).isdigit() else user_id
+        title = stream_meta.get("chat_title", "Voice Stream") if stream_meta else "Voice Stream"
+        caption = f"📊 **Attendance Report**: {title}\nSession: `{stream_id}`"
+        await bot_client.send_file(target, file=csv_path, caption=caption)
+        return json_response({"success": True, "message": f"CSV dispatched to Telegram DM ({user_id})"})
+    except Exception as e:
+        return json_response({"error": f"Failed to send to Telegram DM: {e}"}, status=500)
 
 async def api_groups_get(request):
     """List tracked groups."""
@@ -889,6 +945,8 @@ def create_app():
     app.router.add_get("/api/streams/{stream_id}/transcript", api_stream_transcript)
     app.router.add_get("/api/streams/{stream_id}/summary", api_stream_summary)
     app.router.add_get("/api/streams/{stream_id}/csv", api_stream_csv)
+    app.router.add_post("/api/streams/{stream_id}/send-csv", api_stream_send_csv)
+    app.router.add_get("/api/streams/{stream_id}/send-csv", api_stream_send_csv)
 
     app.router.add_get("/api/groups", api_groups_get)
     app.router.add_post("/api/groups", api_groups_post)

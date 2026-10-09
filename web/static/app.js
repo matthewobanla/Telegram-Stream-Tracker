@@ -934,6 +934,123 @@ document.addEventListener("DOMContentLoaded", () => {
     navigator.clipboard.writeText(text).then(() => showToast("COPIED VERBATIM TRANSCRIPT"));
   });
 
+  // --- FILE DOWNLOAD UTILITIES (BLOB & TELEGRAM DM DISPATCH) ---
+  function triggerBlobDownload(blob, filename) {
+    const blobUrl = window.URL.createObjectURL(blob);
+    const tempLink = document.createElement("a");
+    tempLink.style.display = "none";
+    tempLink.href = blobUrl;
+    tempLink.setAttribute("download", filename);
+    document.body.appendChild(tempLink);
+    tempLink.click();
+    setTimeout(() => {
+      document.body.removeChild(tempLink);
+      window.URL.revokeObjectURL(blobUrl);
+    }, 1500);
+  }
+
+  async function downloadStreamCsv(streamId) {
+    if (!streamId) return;
+    triggerHaptic("medium");
+    const downloadCsvBtn = document.getElementById("btn-download-csv");
+    const originalText = downloadCsvBtn ? downloadCsvBtn.textContent : "EXPORT CSV →";
+
+    if (downloadCsvBtn) {
+      downloadCsvBtn.textContent = "GENERATING CSV...";
+      downloadCsvBtn.style.pointerEvents = "none";
+    }
+
+    try {
+      const tokenParam = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+      const res = await apiFetch(`/api/streams/${streamId}/csv${tokenParam}`);
+
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+
+      const blob = await res.blob();
+      const contentDisp = res.headers.get("Content-Disposition") || "";
+      let filename = `report_${streamId}.csv`;
+      const match = contentDisp.match(/filename="?([^";]+)"?/i);
+      if (match && match[1]) {
+        filename = match[1].trim();
+      }
+
+      triggerBlobDownload(blob, filename);
+
+      // Attempt background dispatch directly to Telegram DM
+      let sentToTelegram = false;
+      if (currentAuthUser?.id || (tg && tg.initDataUnsafe?.user?.id)) {
+        try {
+          const sendRes = await apiFetch(`/api/streams/${streamId}/send-csv`, { method: "POST" });
+          if (sendRes.ok) {
+            sentToTelegram = true;
+          }
+        } catch (e) {
+          console.warn("Notice: Telegram DM dispatch notice:", e);
+        }
+      }
+
+      if (sentToTelegram) {
+        showToast("CSV DOWNLOADED & SENT TO TELEGRAM DM 📥");
+      } else {
+        showToast("CSV REPORT DOWNLOADED 📥");
+      }
+    } catch (err) {
+      console.error("CSV Download error:", err);
+      showToast("FAILED TO DOWNLOAD CSV REPORT");
+    } finally {
+      if (downloadCsvBtn) {
+        downloadCsvBtn.textContent = originalText;
+        downloadCsvBtn.style.pointerEvents = "auto";
+      }
+    }
+  }
+
+  // Event Listeners for Export / Download
+  document.getElementById("btn-download-csv")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    if (activeStreamDetail && activeStreamDetail.stream) {
+      downloadStreamCsv(activeStreamDetail.stream.stream_id);
+    }
+  });
+
+  document.getElementById("btn-download-summary")?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    if (!activeStreamDetail || !activeStreamDetail.stream) return;
+    const sid = activeStreamDetail.stream.stream_id;
+    triggerHaptic("medium");
+    try {
+      const tokenParam = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+      const res = await apiFetch(`/api/streams/${sid}/summary?download=1${tokenParam ? "&" + tokenParam.slice(1) : ""}`);
+      if (res.ok) {
+        const blob = await res.blob();
+        triggerBlobDownload(blob, `summary_${sid}.md`);
+        showToast("EXECUTIVE MINUTES SAVED 📥");
+      }
+    } catch (err) {
+      showToast("FAILED TO SAVE MINUTES");
+    }
+  });
+
+  document.getElementById("btn-download-transcript")?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    if (!activeStreamDetail || !activeStreamDetail.stream) return;
+    const sid = activeStreamDetail.stream.stream_id;
+    triggerHaptic("medium");
+    try {
+      const tokenParam = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+      const res = await apiFetch(`/api/streams/${sid}/transcript?download=1${tokenParam ? "&" + tokenParam.slice(1) : ""}`);
+      if (res.ok) {
+        const blob = await res.blob();
+        triggerBlobDownload(blob, `transcript_${sid}.txt`);
+        showToast("VERBATIM TRANSCRIPT SAVED 📥");
+      }
+    } catch (err) {
+      showToast("FAILED TO SAVE TRANSCRIPT");
+    }
+  });
+
   // --- LIVE MONITOR TAB & HUD STATS ---
   async function loadLiveStatus() {
     try {
