@@ -227,6 +227,121 @@ async def api_auth_config(request):
         "has_passkey": bool(auth.get_admin_passkey())
     })
 
+async def api_auth_inspect(request):
+    """Inspects pending identity from launch token or WebApp initData without unlocking yet."""
+    # 1. Check existing active session
+    sess = await get_request_session(request)
+    if sess:
+        return json_response({
+            "detected": True,
+            "authorized": True,
+            "user": {
+                "id": sess.get("user_id"),
+                "username": sess.get("username"),
+                "name": sess.get("name"),
+            },
+            "state": "authenticated"
+        })
+
+    # 2. Check launch token in query (?auth=...)
+    launch_token = request.query.get("auth", "").strip()
+    if launch_token:
+        record = auth.verify_launch_token(launch_token)
+        if record:
+            user_id = record["user_id"]
+            username = record.get("username", "")
+            is_auth = auth.is_user_authorized(user_id, username)
+            return json_response({
+                "detected": True,
+                "authorized": is_auth,
+                "user": {
+                    "id": user_id,
+                    "username": username,
+                    "name": record.get("name", f"User {user_id}"),
+                },
+                "launch_token": launch_token,
+                "method": "bot_launch",
+                "state": "pending_authorization"
+            })
+
+    # 3. Check X-Telegram-Init-Data header
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    if init_data:
+        user_data, _ = auth.validate_telegram_init_data(init_data)
+        if user_data:
+            user_id = user_data.get("id")
+            username = user_data.get("username", "")
+            name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip() or f"User {user_id}"
+            is_auth = auth.is_user_authorized(user_id, username)
+            return json_response({
+                "detected": True,
+                "authorized": is_auth,
+                "user": {
+                    "id": user_id,
+                    "username": username,
+                    "name": name,
+                },
+                "method": "telegram_webapp",
+                "state": "pending_authorization"
+            })
+
+    return json_response({"detected": False, "state": "anonymous"})
+
+async def api_auth_authorize(request):
+    """Confirms user tap on [AUTHORIZE & ENTER CONTROL ROOM]. Creates session & cookie."""
+    try:
+        data = await request.json()
+        launch_token = data.get("launch_token", "").strip()
+        init_data = data.get("initData", "").strip()
+
+        # A: Authorize via bot launch token
+        if launch_token:
+            record = auth.verify_launch_token(launch_token)
+            if not record:
+                return json_response({"error": "Launch token has expired. Please launch from Telegram bot again."}, status=401)
+
+            user_id = record["user_id"]
+            username = record.get("username", "")
+            name = record.get("name", "")
+
+            if not auth.is_user_authorized(user_id, username):
+                return json_response({"error": "ACCESS_DENIED", "message": f"User {user_id} (@{username}) is not authorized."}, status=403)
+
+            token = auth.consume_launch_token(launch_token)
+            resp = json_response({
+                "success": True,
+                "token": token,
+                "user": { "id": user_id, "username": username, "name": name, "auth_type": "bot_launch" }
+            })
+            resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
+            return resp
+
+        # B: Authorize via WebApp initData
+        if init_data:
+            user_data, err = auth.validate_telegram_init_data(init_data)
+            if not user_data:
+                return json_response({"error": f"Invalid Telegram initData: {err}"}, status=401)
+
+            user_id = user_data.get("id")
+            username = user_data.get("username", "")
+            name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip() or f"User {user_id}"
+
+            if not auth.is_user_authorized(user_id, username):
+                return json_response({"error": "ACCESS_DENIED", "message": f"User {user_id} (@{username}) is not authorized."}, status=403)
+
+            token = auth.create_session(user_id, username=username, name=name, auth_type="webapp")
+            resp = json_response({
+                "success": True,
+                "token": token,
+                "user": { "id": user_id, "username": username, "name": name, "auth_type": "webapp" }
+            })
+            resp.set_cookie("tracker_session", token, max_age=auth.SESSION_TTL_SECONDS, path="/", httponly=True, samesite="Lax")
+            return resp
+
+        return json_response({"error": "Missing authorization token or initData"}, status=400)
+    except Exception as e:
+        return json_response({"error": str(e)}, status=500)
+
 async def api_auth_request_otp(request):
     """Sends a 6-digit OTP code directly to user's Telegram DM via the bot."""
     try:
@@ -681,6 +796,8 @@ def create_app():
 
     # Auth Endpoints
     app.router.add_get("/api/auth/config", api_auth_config)
+    app.router.add_get("/api/auth/inspect", api_auth_inspect)
+    app.router.add_post("/api/auth/authorize", api_auth_authorize)
     app.router.add_post("/api/auth/telegram-webapp", api_auth_webapp)
     app.router.add_post("/api/auth/telegram-widget", api_auth_widget)
     app.router.add_post("/api/auth/request-otp", api_auth_request_otp)

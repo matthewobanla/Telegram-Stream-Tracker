@@ -206,6 +206,47 @@ def validate_telegram_login_widget(auth_data, bot_token=None):
 
 # --- Session Token Management ---
 
+# Launch tokens issued by the Telegram bot for 1-tap authentication
+LAUNCH_TOKENS = {}
+LAUNCH_TOKEN_TTL_SECONDS = 15 * 60  # 15 minutes
+
+def create_launch_token(user_id, username="", name=""):
+    """Creates a secure one-time token from the Telegram bot for 1-tap operator authorization."""
+    token = secrets.token_urlsafe(24)
+    LAUNCH_TOKENS[token] = {
+        "user_id": str(user_id),
+        "username": str(username or "").lstrip("@"),
+        "name": str(name or f"User {user_id}"),
+        "expires_at": time.time() + LAUNCH_TOKEN_TTL_SECONDS
+    }
+    return token
+
+def verify_launch_token(token):
+    """Verifies launch token without consuming it (for previewing operator profile)."""
+    if not token or not isinstance(token, str):
+        return None
+    record = LAUNCH_TOKENS.get(token)
+    if not record:
+        return None
+    if time.time() > record["expires_at"]:
+        LAUNCH_TOKENS.pop(token, None)
+        return None
+    return record
+
+def consume_launch_token(token):
+    """Consumes launch token and creates a long-lived operator session."""
+    record = verify_launch_token(token)
+    if not record:
+        return None
+    # Token used, pop it
+    LAUNCH_TOKENS.pop(token, None)
+    return create_session(
+        user_id=record["user_id"],
+        username=record.get("username", ""),
+        name=record.get("name", ""),
+        auth_type="bot_launch"
+    )
+
 def create_session(user_id, username="", name="", auth_type="webapp"):
     """Generates a secure random session token and stores it."""
     token = secrets.token_urlsafe(32)

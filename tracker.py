@@ -1056,14 +1056,25 @@ async def bot_callback_handler(event):
 
     elif data == b"menu_dashboard":
         dash_text = (
-            "📱 **Telegram Mini App Dashboard**\n"
+            "📱 **Telegram Mini App Dashboard // Control Room**\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "View recorded streams, listen to call recordings, read AI executive minutes, download verbatim transcripts, and configure settings.\n\n"
         )
         if DASHBOARD_URL:
-            dash_text += f"🔗 **Dashboard Web Link**: {DASHBOARD_URL}\n\nTap below to open the Mini App:"
+            sender = await event.get_sender()
+            username = getattr(sender, "username", "")
+            first = getattr(sender, "first_name", "")
+            last = getattr(sender, "last_name", "")
+            full_name = f"{first} {last}".strip() or f"User {event.sender_id}"
+
+            launch_token = auth.create_launch_token(event.sender_id, username=username, name=full_name)
+            sep = "&" if "?" in DASHBOARD_URL else "?"
+            launch_url = f"{DASHBOARD_URL}{sep}auth={launch_token}"
+
+            dash_text += f"👤 **Operator**: {full_name} (`{event.sender_id}`)\nTap below to launch with seamless 1-tap authorization:"
             btns = [
-                [Button.url("🚀 Open Dashboard", DASHBOARD_URL)],
+                [types.KeyboardInlineButton("🚀 Open Control Room", types.InlineButtonTypeWebView(launch_url))],
+                [Button.url("🌐 Open in Browser", launch_url)],
                 [Button.inline("« Back to Menu", b"menu_main")]
             ]
         else:
@@ -1415,10 +1426,26 @@ async def bot_command_handler(event):
     # 1. GROUP MANAGEMENT COMMANDS
     if cmd in ["/dashboard", "/app", "/miniapp", "/web"]:
         if DASHBOARD_URL:
+            sender = await event.get_sender()
+            username = getattr(sender, "username", "")
+            first = getattr(sender, "first_name", "")
+            last = getattr(sender, "last_name", "")
+            full_name = f"{first} {last}".strip() or f"User {event.sender_id}"
+
+            launch_token = auth.create_launch_token(event.sender_id, username=username, name=full_name)
+            sep = "&" if "?" in DASHBOARD_URL else "?"
+            launch_url = f"{DASHBOARD_URL}{sep}auth={launch_token}"
+
             await safe_reply(
                 event,
-                "📱 **Telegram Mini App Dashboard**\n\nTap the button below to view recorded streams, download transcripts & executive minutes, and manage tracker settings:",
-                buttons=[[Button.url("🚀 Open Dashboard", DASHBOARD_URL)]],
+                f"⚡️ **Control Room // Operator Access**\n\n"
+                f"• **Operator**: {full_name} (`{event.sender_id}`)\n"
+                f"• **Handle**: @{username or 'none'}\n\n"
+                f"Tap below to launch the Mini App with seamless 1-tap authorization:",
+                buttons=[
+                    [types.KeyboardInlineButton("🚀 Open Control Room", types.InlineButtonTypeWebView(launch_url))],
+                    [Button.url("🌐 Open in Browser", launch_url)]
+                ],
                 parse_mode="markdown"
             )
         else:

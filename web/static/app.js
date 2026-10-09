@@ -355,130 +355,188 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  function mountTelegramLoginWidget(botUsername) {
-    if (!botUsername) return;
-    const wrapper = document.getElementById("telegram-widget-wrapper");
-    const divider = document.getElementById("widget-divider");
-    const container = document.getElementById("telegram-login-widget-container");
-    if (!container) return;
+  // Pending Operator Identity (before user taps Authorize)
+  let pendingIdentity = null;
 
-    wrapper?.classList.remove("hidden");
-    divider?.classList.remove("hidden");
-    container.innerHTML = "";
-
-    window.onTelegramAuth = async function(user) {
-      triggerHaptic("heavy");
-      showToast("VERIFYING TELEGRAM SIGNATURE...");
-      try {
-        const res = await fetch("/api/auth/telegram-widget", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ auth_data: user })
-        });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          authToken = data.token;
-          localStorage.setItem("tracker_auth_token", authToken);
-          currentAuthUser = data.user;
-          const greetingEl = document.getElementById("user-greeting");
-          if (greetingEl) {
-            greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} (@${data.user.username}) // TELEMETRY ACTIVE`;
-          }
-          hideAuthGate();
-          showToast(`AUTHENTICATED: @${data.user.username}`);
-          loadStreams();
-          loadLiveStatus();
-        } else {
-          showAuthAlert(data.message || data.error || "TELEGRAM AUTHENTICATION REJECTED");
-        }
-      } catch (err) {
-        showAuthAlert("FAILED TO CONNECT TO SERVER FOR TELEGRAM LOGIN");
-      }
-    };
-
-    const script = document.createElement("script");
-    script.src = "https://telegram.org/js/telegram-widget.js?22";
-    script.setAttribute("data-telegram-login", botUsername);
-    script.setAttribute("data-size", "large");
-    script.setAttribute("data-radius", "0");
-    script.setAttribute("data-onauth", "onTelegramAuth(user)");
-    script.setAttribute("data-request-access", "write");
-    script.async = true;
-    container.appendChild(script);
+  function updateOperatorGreeting(user) {
+    const greetingEl = document.getElementById("user-greeting");
+    if (greetingEl && user) {
+      const uname = user.username ? `(@${user.username.toUpperCase()})` : `(ID: ${user.id})`;
+      greetingEl.textContent = `OPERATOR: ${user.name.toUpperCase()} ${uname} // TELEMETRY ACTIVE`;
+    }
   }
+
+  function renderDetectedOperatorCard(identity) {
+    const sectionDetected = document.getElementById("auth-section-detected");
+    const sectionManual = document.getElementById("auth-section-manual");
+    const nameEl = document.getElementById("detected-user-name");
+    const metaEl = document.getElementById("detected-user-meta");
+    const tagEl = document.getElementById("detected-user-tag");
+    const btnAuthorize = document.getElementById("btn-confirm-authorize");
+
+    if (!sectionDetected) return;
+
+    sectionDetected.classList.remove("hidden");
+    if (sectionManual) sectionManual.classList.add("hidden");
+
+    if (nameEl) nameEl.textContent = (identity.name || "OPERATOR").toUpperCase();
+    if (metaEl) {
+      const uname = identity.username ? `@${identity.username}` : "NO USERNAME";
+      metaEl.textContent = `${uname} · ID: ${identity.id || "UNKNOWN"}`;
+    }
+
+    if (identity.authorized === false) {
+      if (tagEl) {
+        tagEl.className = "tag tag-idle";
+        tagEl.textContent = "RESTRICTED";
+      }
+      if (btnAuthorize) {
+        btnAuthorize.disabled = true;
+        btnAuthorize.textContent = "⛔️ ACCESS DENIED (UNAUTHORIZED ID)";
+      }
+      showAuthAlert(`TELEGRAM ID ${identity.id} IS NOT AN AUTHORIZED ADMINISTRATOR.`);
+    } else {
+      if (tagEl) {
+        tagEl.className = "tag tag-green";
+        tagEl.textContent = "AUTHORIZED";
+      }
+      if (btnAuthorize) {
+        btnAuthorize.disabled = false;
+        btnAuthorize.textContent = "⚡️ AUTHORIZE & ENTER CONTROL ROOM";
+      }
+      if (authAlert) authAlert.classList.add("hidden");
+    }
+  }
+
+  function showManualLoginGate() {
+    const sectionDetected = document.getElementById("auth-section-detected");
+    const sectionManual = document.getElementById("auth-section-manual");
+    const returnBox = document.getElementById("detected-return-box");
+
+    if (sectionDetected) sectionDetected.classList.add("hidden");
+    if (sectionManual) sectionManual.classList.remove("hidden");
+    if (returnBox) returnBox.classList.toggle("hidden", !pendingIdentity);
+    showAuthGate();
+  }
+
+  // Switch between detected card and manual forms
+  document.getElementById("btn-switch-manual")?.addEventListener("click", () => {
+    triggerHaptic("selection");
+    showManualLoginGate();
+  });
+
+  document.getElementById("btn-return-detected")?.addEventListener("click", () => {
+    triggerHaptic("selection");
+    if (pendingIdentity) renderDetectedOperatorCard(pendingIdentity);
+  });
+
+  // Tapping [⚡️ AUTHORIZE & ENTER CONTROL ROOM]
+  document.getElementById("btn-confirm-authorize")?.addEventListener("click", async () => {
+    triggerHaptic("heavy");
+    const btn = document.getElementById("btn-confirm-authorize");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "AUTHORIZING OPERATOR...";
+    }
+
+    try {
+      const payload = {};
+      if (pendingIdentity?.launch_token) {
+        payload.launch_token = pendingIdentity.launch_token;
+      }
+      if (tg && tg.initData) {
+        payload.initData = tg.initData;
+      }
+
+      const res = await fetch("/api/auth/authorize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        authToken = data.token;
+        localStorage.setItem("tracker_auth_token", authToken);
+        currentAuthUser = data.user;
+
+        updateOperatorGreeting(currentAuthUser);
+        hideAuthGate();
+        showToast(`WELCOME OPERATOR ${currentAuthUser.name.toUpperCase()}`);
+
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        loadStreams();
+        loadLiveStatus();
+      } else {
+        showAuthAlert(data.message || data.error || "AUTHORIZATION FAILED");
+      }
+    } catch (err) {
+      showAuthAlert("CONNECTION ERROR DURING AUTHORIZATION");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "⚡️ AUTHORIZE & ENTER CONTROL ROOM";
+      }
+    }
+  });
 
   // Master Startup Authentication Routine
   async function initializeAuthentication() {
-    // 0. Load public auth config (such as bot username for the Telegram Widget)
+    // 1. Check URL query string for ?auth=... launch token from bot
+    const urlParams = new URLSearchParams(window.location.search);
+    const launchToken = urlParams.get("auth") || "";
+
     try {
-      const cfgRes = await fetch("/api/auth/config");
-      if (cfgRes.ok) {
-        const cfg = await cfgRes.json();
-        if (cfg.bot_username) {
-          mountTelegramLoginWidget(cfg.bot_username);
-        }
-      }
-    } catch (e) {
-      console.warn("Auth config fetch notice:", e);
-    }
+      const inspectUrl = launchToken ? `/api/auth/inspect?auth=${encodeURIComponent(launchToken)}` : "/api/auth/inspect";
+      const inspectRes = await apiFetch(inspectUrl);
+      if (inspectRes.ok) {
+        const inspectData = await inspectRes.json();
 
-    // 1. If running inside Telegram Mini App, use cryptographic initData signature
-    if (tg && tg.initData) {
-      try {
-        const res = await fetch("/api/auth/telegram-webapp", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ initData: tg.initData })
-        });
-        const data = await res.json();
-
-        if (res.ok && data.success) {
-          authToken = data.token;
-          localStorage.setItem("tracker_auth_token", authToken);
-          currentAuthUser = data.user;
-
-          const greetingEl = document.getElementById("user-greeting");
-          if (greetingEl) {
-            greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} (ID: ${data.user.id}) // TELEMETRY ACTIVE`;
-          }
-
-          hideAuthGate();
-          loadStreams();
-          loadLiveStatus();
-          return;
-        } else if (res.status === 403) {
-          showAuthGate(`⛔️ ACCESS DENIED // TELEGRAM ID ${data.telegram_id} IS NOT AN AUTHORIZED ADMINISTRATOR.`);
-          return;
-        }
-      } catch (err) {
-        console.warn("Telegram initData authentication notice:", err);
-      }
-    }
-
-    // 2. If running in external browser (Chrome / Safari), check existing session
-    try {
-      const res = await apiFetch("/api/auth/me");
-      if (res.ok) {
-        const data = await res.json();
-        if (data.authenticated) {
-          currentAuthUser = data.user;
-          const greetingEl = document.getElementById("user-greeting");
-          if (greetingEl) {
-            greetingEl.textContent = `OPERATOR: ${data.user.name.toUpperCase()} // TELEMETRY ACTIVE`;
-          }
-
+        // If session is already active
+        if (inspectData.state === "authenticated") {
+          currentAuthUser = inspectData.user;
+          updateOperatorGreeting(currentAuthUser);
           hideAuthGate();
           loadStreams();
           loadLiveStatus();
           return;
         }
+
+        // If operator identity is detected (via launch token or Telegram WebApp)
+        if (inspectData.detected && inspectData.user) {
+          pendingIdentity = {
+            ...inspectData.user,
+            launch_token: launchToken || inspectData.launch_token,
+            authorized: inspectData.authorized
+          };
+          renderDetectedOperatorCard(pendingIdentity);
+          showAuthGate();
+          return;
+        }
       }
     } catch (e) {
-      console.warn("Session check notice:", e);
+      console.warn("Auth inspection error:", e);
     }
 
-    // Default: Show auth gate if unauthenticated
-    showAuthGate();
+    // 2. Direct fallback from Telegram WebApp SDK if running inside Telegram
+    if (tg && tg.initDataUnsafe?.user) {
+      const u = tg.initDataUnsafe.user;
+      pendingIdentity = {
+        id: String(u.id),
+        username: u.username || "",
+        name: `${u.first_name || ""} ${u.last_name || ""}`.trim() || `User ${u.id}`,
+        authorized: true
+      };
+      renderDetectedOperatorCard(pendingIdentity);
+      showAuthGate();
+      return;
+    }
+
+    // 3. Fallback: External browser without detected Telegram account
+    showManualLoginGate();
   }
 
   // State
