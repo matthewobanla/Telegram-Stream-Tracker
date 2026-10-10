@@ -74,6 +74,43 @@ def remove_railway_deployment(deployment_id: str, api_token: str) -> bool:
         print(f"[Railway Lifecycle Error] Could not invoke deploymentRemove: {e}")
         return False
 
+def fetch_active_deployment_id(project_id: str, service_id: str, api_token: str) -> str:
+    """Queries Railway GraphQL API for the currently active deployment ID."""
+    query = """
+    query GetDeployments($projectId: String!, $serviceId: String!) {
+        deployments(input: { projectId: $projectId, serviceId: $serviceId }, first: 1) {
+            edges {
+                node {
+                    id
+                    status
+                }
+            }
+        }
+    }
+    """
+    payload = {
+        "query": query,
+        "variables": {"projectId": project_id, "serviceId": service_id}
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        RAILWAY_GRAPHQL_URL,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+            edges = res.get("data", {}).get("deployments", {}).get("edges", [])
+            if edges:
+                return edges[0].get("node", {}).get("id", "")
+    except Exception as e:
+        print(f"[Railway Lifecycle] Deployment lookup notice: {e}")
+    return ""
+
 async def trigger_post_stream_shutdown(delay_seconds: int = 25):
     """
     Executed after stream ends and reports are dispatched.
@@ -89,16 +126,21 @@ async def trigger_post_stream_shutdown(delay_seconds: int = 25):
     
     await asyncio.sleep(delay_seconds)
 
-    if RAILWAY_API_TOKEN and RAILWAY_DEPLOYMENT_ID:
-        print(f"[Railway Lifecycle] Calling Railway API to remove deployment {RAILWAY_DEPLOYMENT_ID}...")
-        loop = asyncio.get_running_loop()
-        success = await loop.run_in_executor(None, remove_railway_deployment, RAILWAY_DEPLOYMENT_ID, RAILWAY_API_TOKEN)
+    loop = asyncio.get_running_loop()
+    target_dep_id = RAILWAY_DEPLOYMENT_ID
+    if not target_dep_id and RAILWAY_API_TOKEN and (RAILWAY_SERVICE_ID and RAILWAY_PROJECT_ID):
+        print("[Railway Lifecycle] Querying Railway for active deployment ID...")
+        target_dep_id = await loop.run_in_executor(None, fetch_active_deployment_id, RAILWAY_PROJECT_ID, RAILWAY_SERVICE_ID, RAILWAY_API_TOKEN)
+
+    if RAILWAY_API_TOKEN and target_dep_id:
+        print(f"[Railway Lifecycle] Calling Railway API to remove deployment {target_dep_id}...")
+        success = await loop.run_in_executor(None, remove_railway_deployment, target_dep_id, RAILWAY_API_TOKEN)
         if success:
             print("[Railway Lifecycle] ✅ Deployment cancellation requested. Container will terminate immediately.")
         else:
             print("[Railway Lifecycle] ⚠️ API request failed. Exiting process with code 0...")
     else:
-        print("[Railway Lifecycle] (RAILWAY_API_TOKEN not set). Exiting process cleanly with sys.exit(0)...")
+        print("[Railway Lifecycle] Exiting process cleanly with sys.exit(0)...")
 
     # Clean exit
     sys.exit(0)
