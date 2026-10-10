@@ -3,7 +3,7 @@ import sys
 import json
 import asyncio
 import datetime
-import hmac
+import re
 from pathlib import Path
 from aiohttp import web
 
@@ -28,9 +28,66 @@ try:
 except Exception as e:
     print(f"[Dashboard Server Warning] DB init: {e}")
 
+_tracker_manager = None
+
 def set_bot_client(client):
     """Sets Telethon bot client instance for sending OTP messages."""
     auth.set_bot_client(client)
+
+def set_tracker_manager(manager):
+    """Sets the MultiCallManager instance from tracker.py for real-time live telemetry."""
+    global _tracker_manager
+    _tracker_manager = manager
+
+def get_live_streams():
+    """Returns active streams and their real-time telemetry from in-memory tracker or database."""
+    # 1. First check in-memory tracker_manager if available
+    if _tracker_manager is not None:
+        try:
+            active_trackers = _tracker_manager.get_all_active()
+            if active_trackers:
+                live_list = []
+                for act in active_trackers:
+                    stats = act.get_current_stats()
+                    participants = stats.get("participants", [])
+                    online_count = sum(1 for p in participants if p.get("is_online"))
+                    total_count = len(participants)
+
+                    st_val = act.call_start_time
+                    st_iso = st_val.isoformat() if hasattr(st_val, "isoformat") else str(st_val)
+                    live_list.append({
+                        "stream_id": act.active_stream_id,
+                        "call_id": str(act.active_call_id),
+                        "chat_title": act.chat_title,
+                        "chat_id": str(act.chat_id),
+                        "start_time": st_iso,
+                        "is_active": 1,
+                        "duration_sec": stats.get("total_sec", 0.0),
+                        "duration_min": stats.get("total_min", 0.0),
+                        "total_participants": total_count,
+                        "online_participants": online_count,
+                        "participants": participants,
+                        "has_audio": True,
+                        "has_transcript": False,
+                        "has_summary": False,
+                        "has_csv": False,
+                    })
+                return live_list
+        except Exception as e:
+            print(f"[Dashboard Live Stream Notice] tracker_manager: {e}")
+
+    # 2. Fallback to database active streams
+    try:
+        db_live = db.get_active_streams()
+        for s in db_live:
+            s["has_audio"] = True
+            s["has_transcript"] = False
+            s["has_summary"] = False
+            s["has_csv"] = False
+        return db_live
+    except Exception as e:
+        print(f"[Dashboard Live Stream Notice] db: {e}")
+        return []
 
 # --- Helper Utilities ---
 
@@ -87,13 +144,14 @@ async def get_request_session(request):
 
 def find_audio_file_for_stream(stream_id, stream_meta=None):
     """Searches for an audio recording file corresponding to stream_id."""
-    if not RECORDINGS_DIR.exists():
+    clean_sid = re.sub(r'[^a-zA-Z0-9_\-]', '', str(stream_id or ""))
+    if not clean_sid or not RECORDINGS_DIR.exists():
         return None
     
     # 1. Exact or partial match on stream_id
     for f in RECORDINGS_DIR.iterdir():
         if f.is_file() and f.suffix.lower() in [".mp3", ".wav", ".ogg", ".m4a", ".aac"]:
-            if stream_id in f.name:
+            if clean_sid in f.name:
                 return f
 
     # 2. Match on date or call_id if meta provided
@@ -114,19 +172,23 @@ def find_audio_file_for_stream(stream_id, stream_meta=None):
 
 def find_transcript_files_for_stream(stream_id):
     """Locates transcript and summary files for a given stream."""
-    transcript_file = TRANSCRIPTS_DIR / f"transcript_{stream_id}.txt"
-    summary_file = TRANSCRIPTS_DIR / f"summary_{stream_id}.md"
+    clean_sid = re.sub(r'[^a-zA-Z0-9_\-]', '', str(stream_id or ""))
+    if not clean_sid or not TRANSCRIPTS_DIR.exists():
+        return None, None
+
+    transcript_file = TRANSCRIPTS_DIR / f"transcript_{clean_sid}.txt"
+    summary_file = TRANSCRIPTS_DIR / f"summary_{clean_sid}.md"
 
     # Also search for partial matches if stream_id varies slightly
-    if not transcript_file.exists() and TRANSCRIPTS_DIR.exists():
+    if not transcript_file.exists():
         for f in TRANSCRIPTS_DIR.iterdir():
-            if f.is_file() and f.name.startswith("transcript_") and stream_id in f.name:
+            if f.is_file() and f.name.startswith("transcript_") and clean_sid in f.name:
                 transcript_file = f
                 break
 
-    if not summary_file.exists() and TRANSCRIPTS_DIR.exists():
+    if not summary_file.exists():
         for f in TRANSCRIPTS_DIR.iterdir():
-            if f.is_file() and f.name.startswith("summary_") and stream_id in f.name:
+            if f.is_file() and f.name.startswith("summary_") and clean_sid in f.name:
                 summary_file = f
                 break
 
@@ -558,10 +620,10 @@ async def api_auth_logout(request):
 async def api_status(request):
     """System health, stats, and active config."""
     try:
+        active_streams = get_live_streams()
         all_streams = db.get_all_streams()
         tracked_groups = db.get_tracked_groups()
         admins = db.get_admin_recipients()
-        active_streams = [s for s in all_streams if s.get("is_active") == 1]
     except Exception as e:
         return json_response({"status": "error", "message": str(e)}, status=500)
 
@@ -574,8 +636,8 @@ async def api_status(request):
         "authenticated": is_authed,
         "operator": sess.get("name") if sess else None,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "total_streams": len(all_streams) if is_authed else None,
-        "active_streams_count": len(active_streams) if is_authed else None,
+        "total_streams": (len(all_streams) + len(active_streams)) if is_authed else None,
+        "active_streams_count": len(active_streams) if is_authed else 0,
         "active_streams": active_streams if is_authed else [],
         "tracked_groups_count": len(tracked_groups) if is_authed else None,
         "admins_count": len(admins) if is_authed else None,
@@ -596,8 +658,22 @@ async def api_streams(request):
     limit = int(limit) if limit and limit.isdigit() else 100
 
     try:
+        active_streams = get_live_streams()
+        if chat_id and str(chat_id).strip() and str(chat_id).strip().lower() != "all":
+            cid_str = str(chat_id).strip()
+            clean_id = cid_str.replace("-100", "").replace("-", "")
+            active_streams = [
+                s for s in active_streams 
+                if cid_str == s.get("chat_id") or clean_id in str(s.get("chat_id", "")) or clean_id in str(s.get("chat_title", ""))
+            ]
+
         raw_streams = db.get_all_streams(chat_id=chat_id)
-        sorted_streams = list(reversed(raw_streams))[:limit]
+        # Avoid duplicating an active stream if it exists in DB
+        active_sids = {s.get("stream_id") for s in active_streams}
+        past_streams = [s for s in reversed(raw_streams) if s.get("stream_id") not in active_sids]
+
+        combined = active_streams + past_streams
+        sorted_streams = combined[:limit]
         
         result = []
         for s in sorted_streams:
@@ -608,7 +684,7 @@ async def api_streams(request):
             has_csv = bool(csv_path and os.path.exists(csv_path))
 
             s_copy = dict(s)
-            s_copy["has_audio"] = bool(audio_f)
+            s_copy["has_audio"] = bool(audio_f) or s_copy.get("is_active") == 1
             s_copy["has_transcript"] = bool(trans_f)
             s_copy["has_summary"] = bool(sum_f)
             s_copy["has_csv"] = has_csv
@@ -622,9 +698,35 @@ async def api_stream_detail(request):
     """Detailed stream info and participants leaderboard."""
     stream_id = request.match_info.get("stream_id")
     try:
-        stream_meta, participants = db.get_stream_by_id(stream_id)
-        if not stream_meta:
-            if stream_id.isdigit():
+        live_meta = None
+        live_participants = None
+        if _tracker_manager:
+            for act in _tracker_manager.get_all_active():
+                if act.active_stream_id == stream_id:
+                    stats = act.get_current_stats()
+                    live_participants = stats.get("participants", [])
+                    st_val = act.call_start_time
+                    st_iso = st_val.isoformat() if hasattr(st_val, "isoformat") else str(st_val)
+                    live_meta = {
+                        "stream_id": act.active_stream_id,
+                        "call_id": str(act.active_call_id),
+                        "chat_title": act.chat_title,
+                        "chat_id": str(act.chat_id),
+                        "start_time": st_iso,
+                        "is_active": 1,
+                        "duration_sec": stats.get("total_sec", 0.0),
+                        "duration_min": stats.get("total_min", 0.0),
+                        "total_participants": len(live_participants),
+                        "online_participants": sum(1 for p in live_participants if p.get("is_online"))
+                    }
+                    break
+
+        if live_meta:
+            stream_meta = live_meta
+            participants = live_participants
+        else:
+            stream_meta, participants = db.get_stream_by_id(stream_id)
+            if not stream_meta and stream_id.isdigit():
                 stream_meta = db.get_stream_by_index(int(stream_id))
                 if stream_meta:
                     _, participants = db.get_stream_by_id(stream_meta["stream_id"])
@@ -641,7 +743,7 @@ async def api_stream_detail(request):
             "participants": participants,
             "participants_count": len(participants),
             "assets": {
-                "has_audio": bool(audio_f),
+                "has_audio": bool(audio_f) or stream_meta.get("is_active") == 1,
                 "audio_filename": audio_f.name if audio_f else None,
                 "has_transcript": bool(trans_f),
                 "has_summary": bool(sum_f),
@@ -888,13 +990,16 @@ def create_app():
                 response = await handler(request)
             response.headers["Access-Control-Allow-Origin"] = "*"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Telegram-Init-Data"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Telegram-Init-Data, X-Device-Token"
             return response
         return middleware
 
     # Authentication Protection Middleware for /api/* routes
     async def auth_middleware(app, handler):
         async def middleware(request):
+            if request.method == "OPTIONS":
+                return await handler(request)
+
             path = request.path
             # Allow public index, static assets, health check, and auth endpoints
             if not path.startswith("/api/") or path.startswith("/api/auth/") or path == "/api/health" or path == "/api/status":

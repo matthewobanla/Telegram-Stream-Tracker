@@ -1,0 +1,15 @@
+.env*
+*.session
+*.session-journal
+session_b64.txt
+session_string.txt
+tracker.db*
+__pycache__/
+*.py[cod]
+.git/
+.venv/
+venv/
+recordings/
+transcripts/
+crash.log
+scratch/

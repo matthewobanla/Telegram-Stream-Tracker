@@ -686,15 +686,15 @@ document.addEventListener("DOMContentLoaded", () => {
           </div>
 
           <div class="card-secondary">
-            ${startDt} · ${durMin > 0 ? durMin + ' MINS DURATION' : 'IN PROGRESS'}
+            ${startDt} · ${isLive ? 'IN PROGRESS (' + (s.duration_min ? s.duration_min.toFixed(1) : durMin) + ' MINS)' : (durMin > 0 ? durMin + ' MINS DURATION' : 'IN PROGRESS')}
           </div>
 
           <div class="meter-row">
-            <span class="meter-label">ATTENDEES</span>
+            <span class="meter-label">${isLive ? 'ONLINE NOW' : 'ATTENDEES'}</span>
             <div class="meter-track">
-              <div class="meter-fill" style="width: ${Math.min(100, (s.total_participants || 0) * 2)}%;"></div>
+              <div class="meter-fill" style="width: ${Math.min(100, ((isLive ? s.online_participants : s.total_participants) || 0) * 2.5)}%;"></div>
             </div>
-            <span class="meter-value">${s.total_participants || 0}</span>
+            <span class="meter-value">${isLive ? (s.online_participants ?? 0) + ' / ' + (s.total_participants || 0) : (s.total_participants || 0)}</span>
           </div>
 
           <div class="card-footer-row">
@@ -1071,28 +1071,82 @@ document.addEventListener("DOMContentLoaded", () => {
       const telemetryEngine = document.getElementById("telemetry-engine-name");
       if (telemetryEngine) telemetryEngine.textContent = `${(status.transcription_engine || "GEMINI").toUpperCase()} (ACTIVE)`;
 
-      // Live banner
+      // Live banner elements
       const liveBanner = document.getElementById("live-call-banner");
       const liveBannerTitle = document.getElementById("live-banner-title");
       const liveBannerTag = document.getElementById("live-banner-tag");
       const liveBannerDesc = document.getElementById("live-banner-desc");
       const livePulseBadge = document.getElementById("badge-live-pulse");
 
+      // Live KPI elements
+      const liveKpis = document.getElementById("live-telemetry-kpis");
+      const liveOnline = document.getElementById("live-hud-online");
+      const liveTotal = document.getElementById("live-hud-total");
+      const liveElapsed = document.getElementById("live-hud-elapsed");
+
+      // Live Callers Leaderboard elements
+      const liveCallersSection = document.getElementById("live-callers-section");
+      const liveCallersPill = document.getElementById("live-callers-pill");
+      const liveCallersTbody = document.getElementById("live-callers-tbody");
+
       if (status.active_streams_count > 0 && status.active_streams?.length > 0) {
         const active = status.active_streams[0];
         liveBanner.classList.add("active");
-        livePulseBadge.classList.remove("hidden");
+        if (livePulseBadge) livePulseBadge.classList.remove("hidden");
         liveBannerTitle.textContent = `LIVE: ${active.chat_title ? active.chat_title.toUpperCase() : 'CALL ACTIVE'}`;
         liveBannerTag.className = "tag tag-running";
-        liveBannerTag.textContent = "RUNNING";
-        liveBannerDesc.textContent = "Telemetry engine logging live attendee joins and drop-offs.";
+        liveBannerTag.textContent = "LIVE NOW";
+        liveBannerDesc.textContent = "Voice chat actively broadcasting. Tracking live attendee joins, durations and drop-offs.";
+
+        // Populate KPIs
+        if (liveKpis) liveKpis.classList.remove("hidden");
+        const onlineCount = active.online_participants ?? (active.total_participants ?? 0);
+        const totalCount = active.total_participants ?? 0;
+        if (liveOnline) liveOnline.textContent = onlineCount;
+        if (liveTotal) liveTotal.textContent = totalCount;
+        const durMin = active.duration_min != null ? active.duration_min : ((active.duration_sec || 0) / 60.0);
+        if (liveElapsed) liveElapsed.textContent = `${durMin.toFixed(1)}m`;
+
+        // Populate Live Callers Leaderboard
+        if (liveCallersSection && liveCallersTbody) {
+          liveCallersSection.classList.remove("hidden");
+          if (liveCallersPill) liveCallersPill.textContent = `${onlineCount} ONLINE NOW`;
+
+          const participants = active.participants || [];
+          if (participants.length > 0) {
+            liveCallersTbody.innerHTML = participants.map((p, idx) => {
+              const uname = p.username ? `@${escapeHtml(p.username)}` : '';
+              const name = escapeHtml(p.name || 'USER');
+              const isOnline = Boolean(p.is_online);
+              const pMin = (p.total_min || 0).toFixed(1);
+              return `
+                <tr>
+                  <td style="font-weight: 800;">${idx + 1}</td>
+                  <td>
+                    <div style="font-weight: 800;">${name}</div>
+                    ${uname ? `<div style="font-size: 11px; color: var(--color-neutral-700);">${uname}</div>` : ''}
+                  </td>
+                  <td>
+                    <span class="tag ${isOnline ? 'tag-running' : 'tag-idle'}">${isOnline ? 'ONLINE' : 'AWAY'}</span>
+                  </td>
+                  <td style="text-align: right; font-weight: 800;">${pMin}m</td>
+                </tr>
+              `;
+            }).join("");
+          } else {
+            liveCallersTbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:12px;">Monitoring callers joining...</td></tr>';
+          }
+        }
       } else {
         liveBanner.classList.remove("active");
-        livePulseBadge.classList.add("hidden");
+        if (livePulseBadge) livePulseBadge.classList.add("hidden");
         liveBannerTitle.textContent = "NO ACTIVE STREAM";
         liveBannerTag.className = "tag tag-idle";
         liveBannerTag.textContent = "IDLE";
         liveBannerDesc.textContent = "Tracking daemon standing by. Listening for voice chat start events.";
+
+        if (liveKpis) liveKpis.classList.add("hidden");
+        if (liveCallersSection) liveCallersSection.classList.add("hidden");
       }
     } catch (e) {
       console.error("Status load failed", e);
@@ -1341,4 +1395,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Start initialization and authentication check
   initializeAuthentication();
+
+  // Real-Time Telemetry Auto-Poll Daemon (every 5 seconds)
+  setInterval(() => {
+    if (document.hidden) return;
+    loadLiveStatus();
+    const livePulse = document.getElementById("badge-live-pulse");
+    const isLive = livePulse && !livePulse.classList.contains("hidden");
+    const activeTab = document.querySelector(".nav-tab.active")?.dataset.tab;
+    if (activeTab === "streams" && isLive) {
+      loadStreams();
+    }
+  }, 5000);
 });

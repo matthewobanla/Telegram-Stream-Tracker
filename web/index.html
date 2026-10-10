@@ -115,6 +115,51 @@
             <span class="tag tag-idle" id="live-banner-tag">IDLE</span>
           </div>
           <p class="card-secondary" id="live-banner-desc">Tracking daemon standing by. Listening for voice chat start events.</p>
+
+          <!-- Real-Time Live HUD Stats (Shown when stream is actively running) -->
+          <div id="live-telemetry-kpis" class="hidden" style="margin-top: 14px; border-top: 1px dashed var(--color-divider); padding-top: 12px;">
+            <div class="hud-strip" style="border: 1px solid var(--color-divider); margin-bottom: 0;">
+              <div class="hud-cell">
+                <span class="hud-label">ONLINE NOW</span>
+                <span class="hud-value" style="color: var(--color-green);" id="live-hud-online">0</span>
+              </div>
+              <div class="hud-cell">
+                <span class="hud-label">TOTAL LOGGED</span>
+                <span class="hud-value" id="live-hud-total">0</span>
+              </div>
+              <div class="hud-cell">
+                <span class="hud-label">ELAPSED</span>
+                <span class="hud-value" id="live-hud-elapsed">0.0m</span>
+              </div>
+              <div class="hud-cell">
+                <span class="hud-label">RECORDING</span>
+                <span class="hud-value" style="font-size:12px; font-weight:800; color:var(--color-green);" id="live-hud-rec">ACTIVE</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Callers Leaderboard (Shown when active) -->
+        <div id="live-callers-section" class="hidden" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
+            <h3 class="section-heading" style="margin-bottom: 0;">LIVE CALLERS LEADERBOARD</h3>
+            <span class="tag tag-running" id="live-callers-pill">0 ONLINE</span>
+          </div>
+          <div class="table-container" style="border: 2px solid var(--color-text); max-height: 280px; overflow-y: auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 36px;">#</th>
+                  <th>CALLER</th>
+                  <th>STATUS</th>
+                  <th style="text-align: right;">TIME</th>
+                </tr>
+              </thead>
+              <tbody id="live-callers-tbody">
+                <tr><td colspan="4" style="text-align:center; padding:12px;">No callers detected yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <h3 class="section-heading">SYSTEM TELEMETRY</h3>

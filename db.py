@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import sqlite3
 import datetime
 import os
@@ -65,6 +66,7 @@ def seed_initial_stream(cursor):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         """, (SEED_STREAM_ID, uid, name, uname, fjoin, lleave, scount, tsec, tmin, pct))
 
+@contextmanager
 def get_connection():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
@@ -74,7 +76,11 @@ def get_connection():
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 60000")
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 def init_db():
     with get_connection() as conn:
@@ -421,7 +427,6 @@ def save_stream_end(stream_id, end_time_dt, csv_path=""):
 def get_latest_stream(chat_id=None):
     """Retrieves the most recent stream session and its participants, sorted chronologically by start_time."""
     try:
-        finalize_dangling_streams()
         sync_all_csv_reports_to_db()
     except Exception:
         pass
@@ -565,13 +570,16 @@ def sync_all_csv_reports_to_db(reports_dir=None):
             except Exception as e:
                 print(f"[DB Sync CSV Notice] Failed to sync {fname}: {e}")
 
-def finalize_dangling_streams():
+def finalize_dangling_streams(exclude_stream_ids=None):
     """Auto-recovers and finalizes any dangling or interrupted active streams in the database."""
+    exclude_set = set(exclude_stream_ids or [])
     with get_connection() as conn:
         c = conn.cursor()
         dangling = c.execute("SELECT * FROM streams WHERE is_active = 1").fetchall()
         for s in dangling:
             sid = s["stream_id"]
+            if sid in exclude_set:
+                continue
             chat_title = s["chat_title"] or "Voice Stream"
             start_time_str = s["start_time"]
             
@@ -652,7 +660,6 @@ def finalize_dangling_streams():
 def get_distinct_stream_groups():
     """Returns a list of all groups (both tracked and with recorded streams), sorted by recency."""
     try:
-        finalize_dangling_streams()
         sync_all_csv_reports_to_db()
     except Exception:
         pass
@@ -697,7 +704,6 @@ def get_distinct_stream_groups():
 def get_all_streams(chat_id=None):
     """Returns all completed streams with 1-based sequential index numbers (1 = first, N = latest)."""
     try:
-        finalize_dangling_streams()
         sync_all_csv_reports_to_db()
     except Exception:
         pass
@@ -806,3 +812,48 @@ def get_stream_history(limit=50, chat_id=None):
     if limit:
         return rev[:limit]
     return rev
+
+def get_active_streams(chat_id=None):
+    """Returns all currently active streams from database with real-time participant counts and elapsed duration."""
+    with get_connection() as conn:
+        c = conn.cursor()
+        query = "SELECT * FROM streams WHERE is_active = 1"
+        params = []
+        if chat_id is not None and str(chat_id).strip() and str(chat_id).strip().lower() != "all":
+            cid_str = str(chat_id).strip()
+            clean_id = cid_str.replace("-100", "").replace("-", "")
+            query += " AND (chat_id = ? OR chat_id LIKE ? OR chat_title LIKE ?)"
+            params = [cid_str, f"%{clean_id}%", f"%{cid_str}%"]
+        query += " ORDER BY start_time DESC"
+        c.execute(query, params)
+        rows = [dict(r) for r in c.fetchall()]
+
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        for s in rows:
+            sid = s["stream_id"]
+            c.execute("""
+                SELECT 
+                    COUNT(*) as total_count,
+                    SUM(CASE WHEN is_online = 1 THEN 1 ELSE 0 END) as online_count
+                FROM participants WHERE stream_id = ?
+            """, (sid,))
+            p_counts = c.fetchone()
+            total_callers = p_counts["total_count"] if p_counts else 0
+            online_callers = (p_counts["online_count"] or 0) if p_counts else 0
+
+            s["total_participants"] = max(s.get("total_participants") or 0, total_callers)
+            s["online_participants"] = online_callers
+            s["is_active"] = 1
+
+            st = s.get("start_time")
+            if st:
+                try:
+                    s_dt = datetime.datetime.fromisoformat(st)
+                    if s_dt.tzinfo is None:
+                        s_dt = s_dt.replace(tzinfo=datetime.timezone.utc)
+                    elapsed_sec = max(0.0, (now_dt - s_dt).total_seconds())
+                    s["duration_sec"] = elapsed_sec
+                    s["duration_min"] = elapsed_sec / 60.0
+                except Exception:
+                    pass
+        return rows

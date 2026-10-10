@@ -13,6 +13,7 @@ import config
 import db
 import transcriber
 import audio_recorder
+import railway_lifecycle
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 if hasattr(sys.stdout, "reconfigure"):
@@ -847,6 +848,10 @@ async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None,
             except Exception as e:
                 print(f"[Auto-Report Notice] Could not send to admin {target}: {e}")
                 print(f"                     (Ensure admin sent /start to the bot once in private DM)")
+
+        # Trigger post-stream container shutdown on Railway if enabled
+        if railway_lifecycle.is_railway_environment() or os.getenv("RAILWAY_AUTO_SHUTDOWN"):
+            asyncio.create_task(railway_lifecycle.trigger_post_stream_shutdown())
     except Exception as e:
         print(f"[Auto-Report Error] Could not dispatch auto-report: {e}")
 
@@ -912,7 +917,8 @@ def get_help_menu():
 async def execute_bot_refresh():
     """Executes a full system refresh: finalizes unclosed streams, syncs CSVs, reloads groups/admins, and refreshes command scopes."""
     try:
-        db.finalize_dangling_streams()
+        active_sids = [act.active_stream_id for act in tracker_manager.get_all_active()]
+        db.finalize_dangling_streams(exclude_stream_ids=active_sids)
         db.sync_all_csv_reports_to_db()
     except Exception as e:
         print(f"[Refresh DB Error] {e}")
@@ -1808,6 +1814,7 @@ async def background_poll_loop():
                         call_id = getattr(group_call, "id", None)
                         if not active_tracker or active_tracker.active_call_id != call_id:
                             active_tracker = tracker_manager.start_call(group_call, chat_title, chat_id_str)
+                            railway_lifecycle.mark_stream_active()
 
                         active_tracker.consecutive_empty_polls = 0
                         active_uids = set()
@@ -1829,8 +1836,21 @@ async def background_poll_loop():
                             all_participants.extend(parts)
                             for u in getattr(participants_res, "users", []):
                                 user_dict[u.id] = u
+                                first = getattr(u, "first_name", "") or ""
+                                last = getattr(u, "last_name", "") or ""
+                                uname = getattr(u, "username", "") or ""
+                                entity_cache[u.id] = {
+                                    "name": f"{first} {last}".strip() or f"User {u.id}",
+                                    "username": uname
+                                }
                             for c in getattr(participants_res, "chats", []):
                                 chat_dict[c.id] = c
+                                ctitle = getattr(c, "title", "") or f"Channel {c.id}"
+                                cuname = getattr(c, "username", "") or ""
+                                entity_cache[c.id] = {
+                                    "name": ctitle,
+                                    "username": cuname
+                                }
 
                             offset = getattr(participants_res, "next_offset", "")
                             if not offset or not parts:
@@ -1840,26 +1860,18 @@ async def background_poll_loop():
                             if getattr(p, "left", False):
                                 continue
                             peer = p.peer
-                            pid, name, username = await resolve_peer_info(user_client, peer)
-                            if pid:
-                                active_uids.add(pid)
-                                if pid in user_dict:
-                                    u = user_dict[pid]
-                                    first = getattr(u, "first_name", "") or ""
-                                    last = getattr(u, "last_name", "") or ""
-                                    fname = f"{first} {last}".strip()
-                                    if fname:
-                                        name = fname
-                                    if getattr(u, "username", ""):
-                                        username = u.username
-                                elif pid in chat_dict:
-                                    c = chat_dict[pid]
-                                    if getattr(c, "title", ""):
-                                        name = c.title
-                                    if getattr(c, "username", ""):
-                                        username = c.username
+                            pid = getattr(peer, "user_id", None) or getattr(peer, "channel_id", None) or getattr(peer, "chat_id", None)
+                            if not pid:
+                                continue
 
-                                active_tracker.register_join(pid, name, username)
+                            active_uids.add(pid)
+                            if pid in entity_cache:
+                                name = entity_cache[pid]["name"]
+                                username = entity_cache[pid]["username"]
+                            else:
+                                pid, name, username = await resolve_peer_info(user_client, peer)
+
+                            active_tracker.register_join(pid, name, username)
 
                         for uid in list(active_tracker.participants.keys()):
                             if uid not in active_uids and active_tracker.participants[uid]["current_join"] is not None:
@@ -2041,6 +2053,7 @@ async def main():
     if ENABLE_DASHBOARD:
         try:
             import dashboard_server
+            dashboard_server.set_tracker_manager(tracker_manager)
             dashboard_runner = await dashboard_server.start_dashboard_server(port=DASHBOARD_PORT)
         except Exception as de:
             print(f"[Dashboard Server Launch Notice] {de}")
@@ -2051,6 +2064,7 @@ async def main():
         try:
             import dashboard_server
             dashboard_server.set_bot_client(bot_client)
+            dashboard_server.set_tracker_manager(tracker_manager)
         except Exception as bce:
             print(f"[Auth OTP Notice] Bot client binding: {bce}")
 
@@ -2125,17 +2139,25 @@ async def main():
 
     user_task = asyncio.create_task(connect_user_client_and_targets())
     poll_task = asyncio.create_task(background_poll_loop())
+    watchdog_task = asyncio.create_task(railway_lifecycle.idle_watchdog_loop(tracker_manager))
 
-    stop_event = asyncio.Event()
     try:
-        await stop_event.wait()
+        done, pending = await asyncio.wait(
+            [user_task, poll_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            if task.exception():
+                raise task.exception()
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:
         print(f"[Notice] Main loop interrupted ({type(e).__name__}: {e})")
+        raise
     finally:
         user_task.cancel()
         poll_task.cancel()
+        watchdog_task.cancel()
         if dashboard_runner:
             try:
                 await dashboard_runner.cleanup()

@@ -40,3 +40,4 @@ transcripts/
 .DS_Store
 Thumbs.db
 scratch/
+.vscode/
