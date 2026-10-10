@@ -51,7 +51,14 @@ export default {
       const isAutoStreamStart = Boolean(msg.video_chat_started || msg.voice_chat_started);
 
       // 2. Manual Admin Commands (/wake, /track, /start_stream)
-      const isManualWakeCommand = text === "/wake" || text === "/track" || text === "/startstream" || text === "/start_stream";
+      const isManualWakeCommand = 
+        text === "/wake" || 
+        text.startsWith("/wake@") || 
+        text.startsWith("/wake ") || 
+        text === "/track" || 
+        text.startsWith("/track@") || 
+        text === "/startstream" || 
+        text === "/start_stream";
 
       if (!isAutoStreamStart && !isManualWakeCommand) {
         return new Response("OK", { status: 200 });

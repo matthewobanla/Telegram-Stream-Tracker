@@ -1429,6 +1429,17 @@ async def bot_command_handler(event):
             )
             return
 
+    # 0. WAKE / PING COMMAND
+    if cmd in ["/wake", "/ping"]:
+        await safe_reply(
+            event,
+            "⚡️ **Tracker Engine Online!**\n"
+            "The Stream Tracker control room is active and monitoring live streams.",
+            buttons=build_main_menu_buttons(),
+            parse_mode="markdown"
+        )
+        return
+
     # 1. GROUP MANAGEMENT COMMANDS
     if cmd in ["/dashboard", "/app", "/miniapp", "/web"]:
         if DASHBOARD_URL:
@@ -1907,6 +1918,7 @@ async def register_bot_commands():
     - Private DMs: Full navigation menu (BotCommandScopeUsers).
     """
     admin_group_commands = [
+        types.BotCommand(command="wake", description="Wake or verify active tracker engine"),
         types.BotCommand(command="menu", description="Interactive admin control panel & menu"),
         types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
         types.BotCommand(command="history", description="Show past stream sessions history"),
@@ -1919,6 +1931,7 @@ async def register_bot_commands():
     ]
 
     dm_commands = [
+        types.BotCommand(command="wake", description="Wake or verify active tracker engine"),
         types.BotCommand(command="menu", description="Show full control panel & navigation"),
         types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
         types.BotCommand(command="history", description="Show past stream sessions history"),
