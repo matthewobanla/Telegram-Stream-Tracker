@@ -1992,27 +1992,24 @@ async def register_bot_commands():
         print(f"[Bot Commands Registration Notice] {e}")
 
 async def sync_bot_dialogs():
-    """Syncs existing DM conversations to admin_recipients and existing groups to tracked_groups."""
+    """Syncs existing conversations into tracked_groups and admin_recipients."""
     try:
-        print("[Bot Sync] Syncing existing bot DM dialogs into admin recipients...")
-        dialogs = await bot_client.get_dialogs(limit=250)
-        synced_count = 0
+        # Telegram MTProto strictly forbids bot accounts from calling GetDialogsRequest.
+        # We safely use user_client if connected, otherwise skip to prevent RPC restrictions.
+        client = user_client if (user_client and user_client.is_connected()) else None
+        if not client:
+            return
+
+        print("[Bot Sync] Syncing existing dialogs into tracked groups...")
+        dialogs = await client.get_dialogs(limit=100)
         for d in dialogs:
             entity = d.entity
-            if d.is_user and not getattr(entity, "bot", False):
-                username = getattr(entity, "username", "")
-                first = getattr(entity, "first_name", "") or ""
-                last = getattr(entity, "last_name", "") or ""
-                full_name = f"{first} {last}".strip() or f"User {d.id}"
-                target = f"@{username}" if username else str(d.id)
-                if db.add_admin_recipient(target, name=full_name, added_by="DM Interaction"):
-                    synced_count += 1
-            elif d.is_group or d.is_channel:
+            if d.is_group or d.is_channel:
                 title = getattr(entity, "title", "") or f"Group {d.id}"
                 username = getattr(entity, "username", "")
                 target = f"@{username}" if username else str(d.id)
                 db.update_tracked_group_info(target, title, str(d.id))
-        print(f"[Bot Sync] Dialogs sync completed. Total admin recipients: {len(db.get_admin_recipients())}")
+        print(f"[Bot Sync] Dialogs sync completed. Total tracked groups: {len(db.get_tracked_groups())}")
     except Exception as e:
         print(f"[Bot Dialogs Sync Notice] {e}")
 
