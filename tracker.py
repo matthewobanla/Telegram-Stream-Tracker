@@ -1429,7 +1429,7 @@ async def bot_command_handler(event):
             )
             return
 
-    # 0. WAKE / PING COMMAND
+    # 0. WAKE / SHUTDOWN COMMANDS
     if cmd in ["/wake", "/ping"]:
         await safe_reply(
             event,
@@ -1438,6 +1438,17 @@ async def bot_command_handler(event):
             buttons=build_main_menu_buttons(),
             parse_mode="markdown"
         )
+        return
+
+    if cmd in ["/shutdown", "/sleep", "/poweroff", "/stoptracker"]:
+        await safe_reply(
+            event,
+            "🛑 **Shutting Down Railway Tracker...**\n\n"
+            "Stopping container execution to conserve cloud compute hours.\n"
+            "The Scout will wake it up automatically when the next livestream begins (or via `/wake`).",
+            parse_mode="markdown"
+        )
+        asyncio.create_task(railway_lifecycle.trigger_post_stream_shutdown(delay_seconds=3))
         return
 
     # 1. GROUP MANAGEMENT COMMANDS
@@ -1919,6 +1930,7 @@ async def register_bot_commands():
     """
     admin_group_commands = [
         types.BotCommand(command="wake", description="Wake or verify active tracker engine"),
+        types.BotCommand(command="shutdown", description="Power off tracker to save compute"),
         types.BotCommand(command="menu", description="Interactive admin control panel & menu"),
         types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
         types.BotCommand(command="history", description="Show past stream sessions history"),
@@ -1932,6 +1944,7 @@ async def register_bot_commands():
 
     dm_commands = [
         types.BotCommand(command="wake", description="Wake or verify active tracker engine"),
+        types.BotCommand(command="shutdown", description="Power off tracker to save compute"),
         types.BotCommand(command="menu", description="Show full control panel & navigation"),
         types.BotCommand(command="stats", description="Show participant leaderboard & attendance %"),
         types.BotCommand(command="history", description="Show past stream sessions history"),
