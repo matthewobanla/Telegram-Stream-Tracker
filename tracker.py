@@ -41,6 +41,7 @@ elif SESSION_B64:
 API_ID = int(os.getenv("API_ID", config.API_ID))
 API_HASH = os.getenv("API_HASH", config.API_HASH)
 BOT_TOKEN = os.getenv("BOT_TOKEN", getattr(config, "BOT_TOKEN", ""))
+BOT_ID = int(BOT_TOKEN.split(":")[0]) if BOT_TOKEN and ":" in str(BOT_TOKEN) else None
 TARGET_CHAT_ENV = os.getenv("TARGET_CHAT", config.TARGET_CHAT)
 AUTO_POST_REPORT = bool(os.getenv("AUTO_POST_REPORT", getattr(config, "AUTO_POST_REPORT", True)))
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", getattr(config, "ADMIN_CHAT_ID", "@KingmattMO"))
@@ -1332,13 +1333,22 @@ async def bot_callback_handler(event):
             pass
 
 # --- IN-TELEGRAM COMMAND & MEDIA HANDLERS ---
-@bot_client.on(events.NewMessage)
+@bot_client.on(events.NewMessage(incoming=True))
 async def bot_command_handler(event):
+    # Ignore outgoing messages or notifications originating from the bot itself (e.g. Cloudflare Worker notifications)
+    if getattr(event, "out", False):
+        return
+    if BOT_ID and getattr(event, "sender_id", None) == BOT_ID:
+        return
+
+    sender = await event.get_sender()
+    if getattr(sender, "bot", False) or getattr(sender, "is_self", False):
+        return
+
     # Restrict private DM interactions strictly to authorized administrators
     if event.is_private:
         is_admin = await is_sender_admin_or_owner(event)
         if not is_admin:
-            sender = await event.get_sender()
             username = getattr(sender, "username", "")
             print(f"[ACCESS DENIED] Unauthorized private message from Telegram ID {event.sender_id} (@{username})")
             await safe_reply(

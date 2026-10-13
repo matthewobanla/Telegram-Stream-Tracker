@@ -80,6 +80,28 @@ export default {
         return new Response("Missing Configuration", { status: 500 });
       }
 
+      // 3. Check if Railway container is ALREADY online to prevent redundant wakes & messages
+      const appUrl = env.DASHBOARD_URL || env.RAILWAY_APP_URL || "https://telegram-stream-tracker-production.up.railway.app";
+      let isAlreadyOnline = false;
+      try {
+        const healthCheck = await fetch(`${appUrl}/api/health`, {
+          method: "GET",
+          signal: AbortSignal.timeout(2500)
+        });
+        if (healthCheck.ok) {
+          isAlreadyOnline = true;
+        }
+      } catch (e) {
+        isAlreadyOnline = false;
+      }
+
+      if (isAlreadyOnline) {
+        console.log(`[Scout] Tracker container at ${appUrl} is already online. Skipping duplicate wake.`);
+        return new Response(JSON.stringify({ success: true, status: "already_online" }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
       // Trigger Railway Service Deployment via GraphQL API
       const railwayResult = await wakeRailwayService(railwayToken, serviceId, environmentId);
 
