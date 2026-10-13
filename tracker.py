@@ -2170,13 +2170,16 @@ async def main():
         print("  Auto-generates attendance CSV reports on stream end.")
         print("  Permanently persists all sessions to SQLite database.\n")
 
-    user_task = asyncio.create_task(connect_user_client_and_targets())
+    # 1. Connect user client and resolve group targets
+    await connect_user_client_and_targets()
+
+    # 2. Start background poll loop & idle watchdog tasks
     poll_task = asyncio.create_task(background_poll_loop())
     watchdog_task = asyncio.create_task(railway_lifecycle.idle_watchdog_loop(tracker_manager))
 
     try:
         done, pending = await asyncio.wait(
-            [user_task, poll_task],
+            [poll_task, watchdog_task],
             return_when=asyncio.FIRST_COMPLETED
         )
         for task in done:
@@ -2188,7 +2191,6 @@ async def main():
         print(f"[Notice] Main loop interrupted ({type(e).__name__}: {e})")
         raise
     finally:
-        user_task.cancel()
         poll_task.cancel()
         watchdog_task.cancel()
         if dashboard_runner:

@@ -28,6 +28,7 @@ RAILWAY_PROJECT_ID = os.getenv("RAILWAY_PROJECT_ID", "").strip()
 
 # Internal State
 _stream_ever_detected = False
+_last_stream_end_time = None
 _boot_timestamp = datetime.datetime.now(datetime.timezone.utc)
 _shutdown_in_progress = False
 
@@ -37,8 +38,14 @@ def is_railway_environment() -> bool:
 
 def mark_stream_active():
     """Signals the idle guard that a real stream was active, preventing early idle shutdown."""
-    global _stream_ever_detected
+    global _stream_ever_detected, _last_stream_end_time
     _stream_ever_detected = True
+    _last_stream_end_time = None
+
+def mark_stream_ended():
+    """Signals that a stream has ended, starting post-stream idle grace period."""
+    global _last_stream_end_time
+    _last_stream_end_time = datetime.datetime.now(datetime.timezone.utc)
 
 def remove_railway_deployment(deployment_id: str, api_token: str) -> bool:
     """
@@ -177,8 +184,9 @@ async def trigger_post_stream_shutdown(delay_seconds: int = 25):
 
 async def idle_watchdog_loop(tracker_manager_ref):
     """
-    Monitors container uptime. If no live stream begins within IDLE_TIMEOUT_MINUTES of boot,
-    powers off the container to prevent accidental idle billing.
+    Monitors container uptime and idle activity:
+    1. If no live stream begins within IDLE_TIMEOUT_MINUTES of boot, powers off the container.
+    2. If a stream began and ended, and no new stream starts within 5 minutes, powers off the container.
     """
     if not AUTO_SHUTDOWN_ENABLED:
         return
@@ -186,22 +194,36 @@ async def idle_watchdog_loop(tracker_manager_ref):
     print(f"[Railway Lifecycle] 🛡 Idle Watchdog active (Will power off in {IDLE_TIMEOUT_MINUTES}m if no stream starts).")
 
     while True:
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
 
-        # Check if any stream is currently active
-        has_active_tracker = len(tracker_manager_ref.get_all_active()) > 0
-        if has_active_tracker:
-            mark_stream_active()
-            continue
+            # Check if any stream is currently active
+            has_active_tracker = len(tracker_manager_ref.get_all_active()) > 0
+            if has_active_tracker:
+                mark_stream_active()
+                continue
 
-        # If a stream occurred earlier, post-stream shutdown handles termination
-        if _stream_ever_detected:
-            continue
+            now = datetime.datetime.now(datetime.timezone.utc)
 
-        # Check uptime
-        uptime = (datetime.datetime.now(datetime.timezone.utc) - _boot_timestamp).total_seconds()
-        if uptime >= IDLE_TIMEOUT_MINUTES * 60:
-            print(f"\n[Railway Lifecycle] ⏰ Idle timeout reached ({IDLE_TIMEOUT_MINUTES} mins without stream start).")
-            print("[Railway Lifecycle] Shutting down container to prevent idle cloud billing...")
-            await trigger_post_stream_shutdown(delay_seconds=5)
-            break
+            # Scenario 1: A stream occurred earlier and has now concluded
+            if _stream_ever_detected:
+                if _last_stream_end_time is None:
+                    mark_stream_ended()
+                else:
+                    idle_since_end = (now - _last_stream_end_time).total_seconds()
+                    if idle_since_end >= 5 * 60:
+                        print(f"\n[Railway Lifecycle] ⏰ Post-stream idle safety timeout reached (5 mins after call ended).")
+                        print("[Railway Lifecycle] Shutting down container to conserve compute hours...")
+                        await trigger_post_stream_shutdown(delay_seconds=5)
+                        break
+                continue
+
+            # Scenario 2: Container booted up, but no stream started within IDLE_TIMEOUT_MINUTES
+            uptime = (now - _boot_timestamp).total_seconds()
+            if uptime >= IDLE_TIMEOUT_MINUTES * 60:
+                print(f"\n[Railway Lifecycle] ⏰ Idle timeout reached ({IDLE_TIMEOUT_MINUTES} mins without stream start).")
+                print("[Railway Lifecycle] Shutting down container to prevent idle cloud billing...")
+                await trigger_post_stream_shutdown(delay_seconds=5)
+                break
+        except Exception as e:
+            print(f"[Railway Lifecycle Watchdog Notice] {e}")

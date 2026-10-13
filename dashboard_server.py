@@ -658,6 +658,7 @@ async def api_status(request):
             "service_id_present": bool(railway_lifecycle.RAILWAY_SERVICE_ID),
             "idle_timeout_minutes": railway_lifecycle.IDLE_TIMEOUT_MINUTES,
             "uptime_seconds": int((datetime.datetime.now(datetime.timezone.utc) - railway_lifecycle._boot_timestamp).total_seconds()),
+            "stream_ever_detected": railway_lifecycle._stream_ever_detected,
             "shutdown_in_progress": railway_lifecycle._shutdown_in_progress
         }
     })
