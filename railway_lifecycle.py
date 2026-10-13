@@ -44,8 +44,20 @@ def remove_railway_deployment(deployment_id: str, api_token: str) -> bool:
     """
     Calls Railway GraphQL API to stop or remove the active deployment.
     Tries deploymentStop first, then falls back to deploymentRemove.
-    This stops container execution and halts billing.
+    Supports both Account Tokens (Authorization: Bearer) and Project Tokens (Project-Access-Token).
+    Supports both railway.com and railway.app endpoints.
     """
+    endpoints = [
+        "https://backboard.railway.com/graphql/v2",
+        "https://backboard.railway.app/graphql/v2"
+    ]
+    
+    auth_variants = [
+        ("Bearer", {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}),
+        ("ProjectToken", {"Project-Access-Token": api_token, "Content-Type": "application/json"}),
+        ("Combined", {"Authorization": f"Bearer {api_token}", "Project-Access-Token": api_token, "Content-Type": "application/json"})
+    ]
+
     for op_name, query_body in [
         ("deploymentStop", "mutation DeploymentStop($id: String!) { deploymentStop(id: $id) }"),
         ("deploymentRemove", "mutation DeploymentRemove($id: String!) { deploymentRemove(id: $id) }"),
@@ -55,24 +67,31 @@ def remove_railway_deployment(deployment_id: str, api_token: str) -> bool:
             "variables": {"id": deployment_id}
         }
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            RAILWAY_GRAPHQL_URL,
-            data=data,
-            headers={
-                "Authorization": f"Bearer {api_token}",
-                "Content-Type": "application/json"
-            }
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                res = json.loads(resp.read().decode("utf-8"))
-                if "errors" in res:
-                    print(f"[Railway Lifecycle Notice] {op_name} response error: {res['errors']}")
-                    continue
-                print(f"[Railway Lifecycle] ✅ {op_name} executed successfully for {deployment_id}.")
-                return True
-        except Exception as e:
-            print(f"[Railway Lifecycle Notice] Could not invoke {op_name}: {e}")
+        
+        for ep in endpoints:
+            for auth_label, headers in auth_variants:
+                req = urllib.request.Request(
+                    ep,
+                    data=data,
+                    headers=headers
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                        if "errors" in res:
+                            print(f"[Railway Lifecycle Notice] {op_name} via {ep} ({auth_label}) errors: {res['errors']}")
+                            continue
+                        print(f"[Railway Lifecycle] ✅ {op_name} succeeded via {ep} using {auth_label} for {deployment_id}!")
+                        return True
+                except urllib.error.HTTPError as e:
+                    err_msg = ""
+                    try:
+                        err_msg = e.read().decode("utf-8")[:150]
+                    except Exception:
+                        pass
+                    print(f"[Railway Lifecycle Notice] {op_name} via {ep} ({auth_label}) HTTP {e.code}: {err_msg or e.reason}")
+                except Exception as e:
+                    print(f"[Railway Lifecycle Notice] {op_name} via {ep} ({auth_label}) error: {e}")
 
     return False
 
@@ -95,22 +114,25 @@ def fetch_active_deployment_id(project_id: str, service_id: str, api_token: str)
         "variables": {"projectId": project_id, "serviceId": service_id}
     }
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        RAILWAY_GRAPHQL_URL,
-        data=data,
-        headers={
-            "Authorization": f"Bearer {api_token}",
-            "Content-Type": "application/json"
-        }
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            edges = res.get("data", {}).get("deployments", {}).get("edges", [])
-            if edges:
-                return edges[0].get("node", {}).get("id", "")
-    except Exception as e:
-        print(f"[Railway Lifecycle] Deployment lookup notice: {e}")
+    
+    for ep in ["https://backboard.railway.com/graphql/v2", "https://backboard.railway.app/graphql/v2"]:
+        for headers in [
+            {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
+            {"Project-Access-Token": api_token, "Content-Type": "application/json"}
+        ]:
+            req = urllib.request.Request(
+                ep,
+                data=data,
+                headers=headers
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
+                    edges = res.get("data", {}).get("deployments", {}).get("edges", [])
+                    if edges:
+                        return edges[0].get("node", {}).get("id", "")
+            except Exception as e:
+                print(f"[Railway Lifecycle] Deployment lookup notice ({ep}): {e}")
     return ""
 
 async def trigger_post_stream_shutdown(delay_seconds: int = 25):
