@@ -10,6 +10,7 @@ from aiohttp import web
 import db
 import transcriber
 import auth
+import railway_lifecycle
 
 # Configuration
 PORT = int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", "8080")))
@@ -648,6 +649,16 @@ async def api_status(request):
             "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
             "auth_required": True,
             "has_passkey": bool(auth.get_admin_passkey())
+        },
+        "lifecycle": {
+            "is_railway": railway_lifecycle.is_railway_environment(),
+            "auto_shutdown_enabled": railway_lifecycle.AUTO_SHUTDOWN_ENABLED,
+            "has_railway_token": bool(railway_lifecycle.RAILWAY_API_TOKEN),
+            "deployment_id_present": bool(railway_lifecycle.RAILWAY_DEPLOYMENT_ID),
+            "service_id_present": bool(railway_lifecycle.RAILWAY_SERVICE_ID),
+            "idle_timeout_minutes": railway_lifecycle.IDLE_TIMEOUT_MINUTES,
+            "uptime_seconds": int((datetime.datetime.now(datetime.timezone.utc) - railway_lifecycle._boot_timestamp).total_seconds()),
+            "shutdown_in_progress": railway_lifecycle._shutdown_in_progress
         }
     })
 

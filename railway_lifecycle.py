@@ -42,37 +42,39 @@ def mark_stream_active():
 
 def remove_railway_deployment(deployment_id: str, api_token: str) -> bool:
     """
-    Calls Railway GraphQL API to cancel/remove the active deployment.
-    This stops the container execution and halts billing.
+    Calls Railway GraphQL API to stop or remove the active deployment.
+    Tries deploymentStop first, then falls back to deploymentRemove.
+    This stops container execution and halts billing.
     """
-    query = """
-    mutation DeploymentRemove($id: String!) {
-        deploymentRemove(id: $id)
-    }
-    """
-    payload = {
-        "query": query,
-        "variables": {"id": deployment_id}
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        RAILWAY_GRAPHQL_URL,
-        data=data,
-        headers={
-            "Authorization": f"Bearer {api_token}",
-            "Content-Type": "application/json"
+    for op_name, query_body in [
+        ("deploymentStop", "mutation DeploymentStop($id: String!) { deploymentStop(id: $id) }"),
+        ("deploymentRemove", "mutation DeploymentRemove($id: String!) { deploymentRemove(id: $id) }"),
+    ]:
+        payload = {
+            "query": query_body,
+            "variables": {"id": deployment_id}
         }
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            if "errors" in res:
-                print(f"[Railway Lifecycle Error] GraphQL response error: {res['errors']}")
-                return False
-            return True
-    except Exception as e:
-        print(f"[Railway Lifecycle Error] Could not invoke deploymentRemove: {e}")
-        return False
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            RAILWAY_GRAPHQL_URL,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/json"
+            }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if "errors" in res:
+                    print(f"[Railway Lifecycle Notice] {op_name} response error: {res['errors']}")
+                    continue
+                print(f"[Railway Lifecycle] ✅ {op_name} executed successfully for {deployment_id}.")
+                return True
+        except Exception as e:
+            print(f"[Railway Lifecycle Notice] Could not invoke {op_name}: {e}")
+
+    return False
 
 def fetch_active_deployment_id(project_id: str, service_id: str, api_token: str) -> str:
     """Queries Railway GraphQL API for the currently active deployment ID."""
@@ -133,17 +135,20 @@ async def trigger_post_stream_shutdown(delay_seconds: int = 25):
         target_dep_id = await loop.run_in_executor(None, fetch_active_deployment_id, RAILWAY_PROJECT_ID, RAILWAY_SERVICE_ID, RAILWAY_API_TOKEN)
 
     if RAILWAY_API_TOKEN and target_dep_id:
-        print(f"[Railway Lifecycle] Calling Railway API to remove deployment {target_dep_id}...")
+        print(f"[Railway Lifecycle] Calling Railway API to terminate deployment {target_dep_id}...")
         success = await loop.run_in_executor(None, remove_railway_deployment, target_dep_id, RAILWAY_API_TOKEN)
         if success:
             print("[Railway Lifecycle] ✅ Deployment cancellation requested. Container will terminate immediately.")
         else:
-            print("[Railway Lifecycle] ⚠️ API request failed. Exiting process with code 0...")
+            print("[Railway Lifecycle] ⚠️ API request failed. Exiting process with os._exit(0)...")
     else:
-        print("[Railway Lifecycle] Exiting process cleanly with sys.exit(0)...")
+        if not RAILWAY_API_TOKEN:
+            print("[Railway Lifecycle WARNING] ⚠️ RAILWAY_API_TOKEN is not set in environment variables!")
+            print("[Railway Lifecycle WARNING] Programmatic scale-to-zero requires RAILWAY_API_TOKEN in Railway service settings.")
+        print("[Railway Lifecycle] Exiting process with os._exit(0)...")
 
-    # Clean exit
-    sys.exit(0)
+    # Hard exit terminates process immediately even from background asyncio task
+    os._exit(0)
 
 async def idle_watchdog_loop(tracker_manager_ref):
     """
