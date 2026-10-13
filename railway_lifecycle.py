@@ -17,7 +17,7 @@ RAILWAY_GRAPHQL_URL = "https://backboard.railway.app/graphql/v2"
 
 # Configuration
 AUTO_SHUTDOWN_ENABLED = os.getenv("RAILWAY_AUTO_SHUTDOWN", "True").lower() in ("true", "1", "yes")
-IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_SHUTDOWN_MINUTES", "15"))
+IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_SHUTDOWN_MINUTES", "5"))
 
 # Railway Auto-injected or User-provided Variables
 RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN", "").strip()
