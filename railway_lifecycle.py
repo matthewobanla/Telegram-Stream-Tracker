@@ -52,10 +52,12 @@ def remove_railway_deployment(deployment_id: str, api_token: str) -> bool:
         "https://backboard.railway.app/graphql/v2"
     ]
     
+    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    
     auth_variants = [
-        ("Bearer", {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}),
-        ("ProjectToken", {"Project-Access-Token": api_token, "Content-Type": "application/json"}),
-        ("Combined", {"Authorization": f"Bearer {api_token}", "Project-Access-Token": api_token, "Content-Type": "application/json"})
+        ("Bearer", {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json", "User-Agent": USER_AGENT}),
+        ("ProjectToken", {"Project-Access-Token": api_token, "Content-Type": "application/json", "User-Agent": USER_AGENT}),
+        ("Combined", {"Authorization": f"Bearer {api_token}", "Project-Access-Token": api_token, "Content-Type": "application/json", "User-Agent": USER_AGENT})
     ]
 
     for op_name, query_body in [
@@ -97,6 +99,7 @@ def remove_railway_deployment(deployment_id: str, api_token: str) -> bool:
 
 def fetch_active_deployment_id(project_id: str, service_id: str, api_token: str) -> str:
     """Queries Railway GraphQL API for the currently active deployment ID."""
+    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     query = """
     query GetDeployments($projectId: String!, $serviceId: String!) {
         deployments(input: { projectId: $projectId, serviceId: $serviceId }, first: 1) {
@@ -117,8 +120,8 @@ def fetch_active_deployment_id(project_id: str, service_id: str, api_token: str)
     
     for ep in ["https://backboard.railway.com/graphql/v2", "https://backboard.railway.app/graphql/v2"]:
         for headers in [
-            {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
-            {"Project-Access-Token": api_token, "Content-Type": "application/json"}
+            {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json", "User-Agent": USER_AGENT},
+            {"Project-Access-Token": api_token, "Content-Type": "application/json", "User-Agent": USER_AGENT}
         ]:
             req = urllib.request.Request(
                 ep,
