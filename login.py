@@ -35,10 +35,29 @@ async def main():
         sqlite_sess.close()
         with open("session_string.txt", "w", encoding="utf-8") as f:
             f.write(string_val)
+        
+        # Also auto-update local .env if present
+        if os.path.exists(".env"):
+            with open(".env", "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            updated = False
+            for i, line in enumerate(lines):
+                if line.strip().startswith("SESSION_STRING="):
+                    lines[i] = f"SESSION_STRING={string_val}\n"
+                    updated = True
+                    break
+            if not updated:
+                lines.append(f"\nSESSION_STRING={string_val}\n")
+            with open(".env", "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            print("✅ Auto-updated 'SESSION_STRING' in your local .env file.")
+
         print("\n" + "=" * 60)
         print("✅ NEW SESSION STRING GENERATED AND SAVED TO 'session_string.txt'")
         print("=" * 60)
-        print("Copy the text from 'session_string.txt' and update 'SESSION_STRING' on Railway.")
+        print("NEXT STEP FOR RAILWAY:")
+        print("1. Go to your Railway Project -> Service -> Variables")
+        print("2. Set 'SESSION_STRING' to the new value from 'session_string.txt'")
         print("=" * 60 + "\n")
     except Exception as e:
         print(f"[Export Notice] Run 'python export_session.py' to generate session string: {e}")
