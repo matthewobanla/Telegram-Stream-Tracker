@@ -12,11 +12,17 @@
  * 4. Alerts the Telegram group: "🚀 Live stream detected! Waking up tracker..."
  */
 
-const RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.app/graphql/v2";
+const RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
+const DEFAULT_PROJECT_ID = "af0d94de-eb6e-40e7-9076-e75c74f9e039";
+const DEFAULT_SERVICE_ID = "7cc26fb3-a309-4ff2-b583-da8b5f33f822";
+const DEFAULT_ENVIRONMENT_ID = "c5ab5828-4d59-4f3e-9963-79dd778bb0aa";
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const serviceId = (env.RAILWAY_SERVICE_ID || DEFAULT_SERVICE_ID).trim();
+    const environmentId = (env.RAILWAY_ENVIRONMENT_ID || DEFAULT_ENVIRONMENT_ID).trim();
+    const projectId = (env.RAILWAY_PROJECT_ID || DEFAULT_PROJECT_ID).trim();
 
     // Simple health check or diagnostic wake test in browser
     if (request.method === "GET") {
@@ -24,14 +30,20 @@ export default {
         try {
           const res = await wakeRailwayService(
             env.RAILWAY_API_TOKEN,
-            env.RAILWAY_SERVICE_ID,
-            env.RAILWAY_ENVIRONMENT_ID
+            serviceId,
+            environmentId,
+            projectId
           );
           return new Response(JSON.stringify({ ok: true, railway: res }), {
             headers: { "Content-Type": "application/json" }
           });
         } catch (err) {
-          return new Response(JSON.stringify({ ok: false, error: err.message }), {
+          return new Response(JSON.stringify({
+            ok: false,
+            error: err.message,
+            ids_used: { projectId, serviceId, environmentId },
+            token_length: (env.RAILWAY_API_TOKEN || "").trim().length
+          }), {
             status: 200,
             headers: { "Content-Type": "application/json" }
           });
@@ -43,8 +55,10 @@ export default {
         service: "telegram-railway-wake-scout",
         configured: {
           has_railway_token: Boolean(env.RAILWAY_API_TOKEN),
-          has_service_id: Boolean(env.RAILWAY_SERVICE_ID),
-          has_environment_id: Boolean(env.RAILWAY_ENVIRONMENT_ID),
+          token_length: (env.RAILWAY_API_TOKEN || "").trim().length,
+          service_id: serviceId,
+          environment_id: environmentId,
+          project_id: projectId,
           has_bot_token: Boolean(env.BOT_TOKEN)
         },
         time: new Date().toISOString()
@@ -97,18 +111,16 @@ export default {
 
       console.log(`[Scout] Trigger detected in [${chatTitle}] (ID: ${chatId}). Trigger: ${isAutoStreamStart ? "Automatic video_chat_started" : text}`);
 
-      // Read Railway credentials from Worker Environment Variables (or fallback)
+      // Read Railway credentials from Worker Environment Variables (or fallback to verified IDs)
       const railwayToken = env.RAILWAY_API_TOKEN;
-      const serviceId = env.RAILWAY_SERVICE_ID;
-      const environmentId = env.RAILWAY_ENVIRONMENT_ID;
       const botToken = env.BOT_TOKEN;
 
-      if (!railwayToken || !serviceId || !environmentId) {
-        console.error("[Scout Error] Missing Railway configuration environment variables.");
+      if (!railwayToken) {
+        console.error("[Scout Error] Missing RAILWAY_API_TOKEN environment variable.");
         if (botToken) {
-          await sendTelegramMessage(botToken, chatId, "⚠️ **Wake-on-Call Scout Error:** Missing Railway API credentials in Cloudflare Worker settings.");
+          await sendTelegramMessage(botToken, chatId, "⚠️ **Wake-on-Call Scout Error:** Missing RAILWAY_API_TOKEN in Cloudflare Worker settings.");
         }
-        return new Response(JSON.stringify({ ok: false, error: "Missing Configuration" }), {
+        return new Response(JSON.stringify({ ok: false, error: "Missing RAILWAY_API_TOKEN" }), {
           status: 200,
           headers: { "Content-Type": "application/json" }
         });
@@ -137,7 +149,7 @@ export default {
       }
 
       // Trigger Railway Service Deployment via GraphQL API
-      const railwayResult = await wakeRailwayService(railwayToken, serviceId, environmentId);
+      const railwayResult = await wakeRailwayService(railwayToken, serviceId, environmentId, projectId);
 
       // Notify Telegram Chat
       if (botToken && chatId) {
@@ -164,22 +176,17 @@ export default {
 
 /**
  * Triggers deployment/start of the Railway service instance.
- * Tests Bearer (Account/Workspace Token) and Project-Access-Token (Project Token) separately
- * across railway.com and railway.app endpoints.
+ * Tests Bearer (Account/Workspace Token) and Project-Access-Token (Project Token) separately,
+ * and falls back across serviceInstanceRedeploy, serviceInstanceDeployV2, and deploymentRedeploy.
  */
-async function wakeRailwayService(token, serviceId, environmentId) {
+async function wakeRailwayService(token, serviceId, environmentId, projectId = DEFAULT_PROJECT_ID) {
   const cleanToken = (token || "").trim();
-  const cleanServiceId = (serviceId || "").trim();
-  const cleanEnvId = (environmentId || "").trim();
-
-  const mutations = [
-    `mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
-      serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
-    }`,
-    `mutation ServiceInstanceDeploy($serviceId: String!, $environmentId: String!) {
-      serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
-    }`
+  const targetPairs = [
+    { sId: (serviceId || DEFAULT_SERVICE_ID).trim(), eId: (environmentId || DEFAULT_ENVIRONMENT_ID).trim(), pId: (projectId || DEFAULT_PROJECT_ID).trim() }
   ];
+  if (targetPairs[0].sId !== DEFAULT_SERVICE_ID || targetPairs[0].eId !== DEFAULT_ENVIRONMENT_ID) {
+    targetPairs.push({ sId: DEFAULT_SERVICE_ID, eId: DEFAULT_ENVIRONMENT_ID, pId: DEFAULT_PROJECT_ID });
+  }
 
   const endpoints = [
     "https://backboard.railway.com/graphql/v2",
@@ -195,33 +202,81 @@ async function wakeRailwayService(token, serviceId, environmentId) {
 
   let lastError = null;
 
-  for (const query of mutations) {
+  for (const { sId, eId, pId } of targetPairs) {
+    const mutations = [
+      {
+        name: "serviceInstanceRedeploy",
+        query: `mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
+          serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+        }`,
+        variables: { serviceId: sId, environmentId: eId }
+      },
+      {
+        name: "serviceInstanceDeployV2",
+        query: `mutation ServiceInstanceDeployV2($serviceId: String!, $environmentId: String!) {
+          serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
+        }`,
+        variables: { serviceId: sId, environmentId: eId }
+      }
+    ];
+
     for (const ep of endpoints) {
       for (const headers of authHeadersList) {
+        // 1. Try serviceInstanceRedeploy & serviceInstanceDeployV2
+        for (const m of mutations) {
+          try {
+            const response = await fetch(ep, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ query: m.query, variables: m.variables })
+            });
+            const data = await response.json();
+            if (data.errors && data.errors.length > 0) {
+              lastError = new Error(`${m.name}: ${data.errors.map(e => e.message).join(", ")}`);
+              continue;
+            }
+            return { method: m.name, data: data.data };
+          } catch (err) {
+            lastError = err;
+          }
+        }
+
+        // 2. Fallback: Lookup latest deployment ID and call deploymentRedeploy(id)
         try {
-          const response = await fetch(ep, {
+          const depLookupQuery = `
+            query GetDeployments($projectId: String!, $serviceId: String!) {
+              deployments(input: { projectId: $projectId, serviceId: $serviceId }, first: 1) {
+                edges { node { id status } }
+              }
+            }
+          `;
+          const lookupResp = await fetch(ep, {
             method: "POST",
             headers,
             body: JSON.stringify({
-              query,
-              variables: {
-                serviceId: cleanServiceId,
-                environmentId: cleanEnvId
-              }
+              query: depLookupQuery,
+              variables: { projectId: pId, serviceId: sId }
             })
           });
-
-          const data = await response.json();
-          if (data.errors && data.errors.length > 0) {
-            lastError = new Error(data.errors.map(e => e.message).join(", "));
-            console.error(`[Railway GraphQL Error at ${ep}]`, data.errors);
-            continue;
+          const lookupData = await lookupResp.json();
+          const latestDepId = lookupData?.data?.deployments?.edges?.[0]?.node?.id;
+          if (latestDepId) {
+            const redeployResp = await fetch(ep, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                query: `mutation DeploymentRedeploy($id: String!) { deploymentRedeploy(id: $id) { id status } }`,
+                variables: { id: latestDepId }
+              })
+            });
+            const redeployData = await redeployResp.json();
+            if (!redeployData.errors || redeployData.errors.length === 0) {
+              return { method: "deploymentRedeploy", deploymentId: latestDepId, data: redeployData.data };
+            }
+            lastError = new Error(`deploymentRedeploy(${latestDepId}): ${redeployData.errors.map(e => e.message).join(", ")}`);
           }
-
-          return data.data;
         } catch (err) {
           lastError = err;
-          console.error(`[Railway Network Error at ${ep}]`, err);
         }
       }
     }
