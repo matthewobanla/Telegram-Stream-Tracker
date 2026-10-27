@@ -43,25 +43,45 @@ def is_railway_environment() -> bool:
     """Detects if running inside a Railway container."""
     return bool(RAILWAY_DEPLOYMENT_ID or RAILWAY_SERVICE_ID or os.getenv("RAILWAY_STATIC_URL"))
 
-def has_wake_webhook_configured() -> bool:
+def ensure_wake_webhook_registered() -> str:
     """
-    Checks Telegram Bot API getWebhookInfo to verify if an external Wake-on-Call
-    Scout webhook URL is registered. Without an active webhook URL, scaling to zero
-    would leave the container unable to wake up automatically when a call starts.
+    Checks Telegram Bot API getWebhookInfo. If WAKE_WEBHOOK_URL or CLOUDFLARE_WORKER_URL
+    is configured in environment variables and not yet set on Telegram, automatically
+    registers it via setWebhook so Cloudflare Wake-on-Call is always active.
+    Returns the currently active webhook URL (or empty string if none).
     """
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     if not bot_token:
-        return False
-    url = f"https://api.telegram.org/bot{bot_token}/getWebhookInfo"
+        return ""
+    configured_worker_url = (
+        os.getenv("WAKE_WEBHOOK_URL", "").strip()
+        or os.getenv("CLOUDFLARE_WORKER_URL", "").strip()
+    )
+    info_url = f"https://api.telegram.org/bot{bot_token}/getWebhookInfo"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(info_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             wh_url = data.get("result", {}).get("url", "").strip()
-            return bool(wh_url)
+            if wh_url:
+                return wh_url
     except Exception as e:
         print(f"[Railway Lifecycle] Webhook check notice: {e}", flush=True)
-        return False
+
+    if configured_worker_url:
+        try:
+            import urllib.parse
+            encoded_url = urllib.parse.quote(configured_worker_url, safe=":/?&=")
+            set_url = f"https://api.telegram.org/bot{bot_token}/setWebhook?url={encoded_url}&allowed_updates=%5B%22message%22%2C%22channel_post%22%5D"
+            req = urllib.request.Request(set_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if res.get("ok"):
+                    print(f"[Railway Lifecycle] ✅ Auto-registered Cloudflare Wake Webhook: {configured_worker_url}", flush=True)
+                    return configured_worker_url
+        except Exception as e:
+            print(f"[Railway Lifecycle] Auto-register webhook notice: {e}", flush=True)
+    return ""
 
 def register_cleanup_callback(cb):
     """Registers an async or sync callback to run before container termination."""
@@ -184,27 +204,28 @@ def fetch_active_deployment_id(project_id: str, service_id: str, api_token: str)
 
 async def trigger_post_stream_shutdown(delay_seconds: int = 25, force: bool = False):
     """
-    Executed after stream ends and reports are dispatched.
-    Waits for network transfers to complete, then shuts down Railway container.
+    Executed when the idle timeout is reached or when manually triggered via /shutdown.
+    Waits for network transfers to complete, ensures the Wake Webhook is registered if configured,
+    then shuts down the Railway container.
     """
     global _shutdown_in_progress
     if _shutdown_in_progress or (not AUTO_SHUTDOWN_ENABLED and not force):
         return
 
-    loop = asyncio.get_running_loop()
-    if not force:
-        has_webhook = await loop.run_in_executor(None, has_wake_webhook_configured)
-        if not has_webhook:
-            print(
-                "[Railway Lifecycle] 🌐 Keeping container online 24/7: No Wake-on-Call Webhook is registered on Telegram Bot API.",
-                flush=True
-            )
-            return
-
     _shutdown_in_progress = True
+    loop = asyncio.get_running_loop()
 
-    print(f"\n[Railway Lifecycle] 🛑 Stream completed & reports delivered.", flush=True)
-    print(f"[Railway Lifecycle] Scheduling container shutdown in {delay_seconds}s to conserve compute billing...", flush=True)
+    wh_url = await loop.run_in_executor(None, ensure_wake_webhook_registered)
+    if wh_url:
+        print(f"[Railway Lifecycle] ✅ Verified Telegram Wake-on-Call Webhook is active: {wh_url}", flush=True)
+    else:
+        print(
+            "[Railway Lifecycle WARNING] ⚠️ No Telegram Webhook URL is currently registered on Bot API! "
+            "Register your Cloudflare Worker URL via: python3 setup_wake_scout.py --set-webhook <WORKER_URL>",
+            flush=True
+        )
+
+    print(f"\n[Railway Lifecycle] 🛑 Scheduling container shutdown in {delay_seconds}s to conserve compute billing...", flush=True)
     
     await asyncio.sleep(delay_seconds)
 
@@ -240,9 +261,9 @@ async def trigger_post_stream_shutdown(delay_seconds: int = 25, force: bool = Fa
 async def idle_watchdog_loop(tracker_manager_ref):
     """
     Monitors container uptime and idle activity:
-    1. If no live stream begins within IDLE_TIMEOUT_MINUTES of boot, powers off the container (only if Wake Webhook is configured).
-    2. If a stream began and ended, and no new stream starts within IDLE_TIMEOUT_MINUTES, powers off the container.
-    3. Keeps container alive if an operator is actively using the web dashboard or if no Wake Webhook is registered.
+    1. If no live stream begins within IDLE_TIMEOUT_MINUTES (15m) of boot, powers off the container.
+    2. If a stream began and ended, and no new stream starts within IDLE_TIMEOUT_MINUTES (15m), powers off the container.
+    3. Keeps container alive if an operator is actively using the web dashboard.
     """
     if not AUTO_SHUTDOWN_ENABLED:
         print("[Railway Lifecycle] 🌐 Auto-shutdown is disabled. Web dashboard & tracker will stay online 24/7.", flush=True)
@@ -250,17 +271,16 @@ async def idle_watchdog_loop(tracker_manager_ref):
             await asyncio.sleep(3600)
 
     loop = asyncio.get_running_loop()
-    has_webhook = await loop.run_in_executor(None, has_wake_webhook_configured)
-    if has_webhook:
-        print(f"[Railway Lifecycle] 🛡 Idle Watchdog active (Will power off in {IDLE_TIMEOUT_MINUTES}m if no stream or web activity).", flush=True)
+    wh_url = await loop.run_in_executor(None, ensure_wake_webhook_registered)
+    print(f"[Railway Lifecycle] 🛡 Idle Watchdog active (Will power off after {IDLE_TIMEOUT_MINUTES}m of no live call or web activity).", flush=True)
+    if wh_url:
+        print(f"[Railway Lifecycle] ⚡️ Cloudflare Wake-on-Call Webhook active: {wh_url}", flush=True)
     else:
         print(
-            "[Railway Lifecycle] 🌐 No Telegram Wake-on-Call Webhook detected. "
-            "Container will stay online 24/7 so live calls are never missed!",
+            "[Railway Lifecycle Notice] ⚠️ No Telegram Webhook URL is currently registered on Bot API. "
+            "Set WAKE_WEBHOOK_URL in Railway variables or run: python3 setup_wake_scout.py --set-webhook <WORKER_URL>",
             flush=True
         )
-
-    _warned_no_webhook = not has_webhook
 
     while True:
         try:
@@ -286,12 +306,7 @@ async def idle_watchdog_loop(tracker_manager_ref):
                 else:
                     idle_since_end = (now - _last_stream_end_time).total_seconds()
                     if idle_since_end >= IDLE_TIMEOUT_MINUTES * 60:
-                        if not await loop.run_in_executor(None, has_wake_webhook_configured):
-                            if not _warned_no_webhook:
-                                print("[Railway Lifecycle] 🌐 Skipping idle shutdown: No Wake-on-Call Webhook is registered on Telegram.", flush=True)
-                                _warned_no_webhook = True
-                            continue
-                        print(f"\n[Railway Lifecycle] ⏰ Post-stream idle safety timeout reached ({IDLE_TIMEOUT_MINUTES} mins after call ended).", flush=True)
+                        print(f"\n[Railway Lifecycle] ⏰ Post-stream idle timeout reached ({IDLE_TIMEOUT_MINUTES} mins after call ended).", flush=True)
                         print("[Railway Lifecycle] Shutting down container to conserve compute hours...", flush=True)
                         await trigger_post_stream_shutdown(delay_seconds=5)
                         break
@@ -300,11 +315,6 @@ async def idle_watchdog_loop(tracker_manager_ref):
             # Scenario 2: Container booted up, but no stream started within IDLE_TIMEOUT_MINUTES
             uptime = (now - _boot_timestamp).total_seconds()
             if uptime >= IDLE_TIMEOUT_MINUTES * 60:
-                if not await loop.run_in_executor(None, has_wake_webhook_configured):
-                    if not _warned_no_webhook:
-                        print("[Railway Lifecycle] 🌐 Skipping idle shutdown: No Wake-on-Call Webhook is registered on Telegram.", flush=True)
-                        _warned_no_webhook = True
-                    continue
                 print(f"\n[Railway Lifecycle] ⏰ Idle timeout reached ({IDLE_TIMEOUT_MINUTES} mins without stream start or web activity).", flush=True)
                 print("[Railway Lifecycle] Shutting down container to prevent idle cloud billing...", flush=True)
                 await trigger_post_stream_shutdown(delay_seconds=5)

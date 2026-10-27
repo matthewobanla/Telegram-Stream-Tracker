@@ -871,9 +871,15 @@ async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None,
                 print(f"[Auto-Report Notice] Could not send to admin {target}: {e}")
                 print(f"                     (Ensure admin sent /start to the bot once in private DM)")
 
-        # Trigger post-stream container shutdown on Railway if enabled and no other stream is active
-        if (railway_lifecycle.is_railway_environment() or os.getenv("RAILWAY_AUTO_SHUTDOWN")) and len(tracker_manager.get_all_active()) == 0:
-            asyncio.create_task(railway_lifecycle.trigger_post_stream_shutdown())
+        # Start 15-minute post-stream idle countdown on Railway if no other stream is active
+        if len(tracker_manager.get_all_active()) == 0:
+            railway_lifecycle.mark_stream_ended()
+            if railway_lifecycle.AUTO_SHUTDOWN_ENABLED:
+                print(
+                    f"[Railway Lifecycle] ⏳ All streams ended & reports delivered. "
+                    f"Container will auto-shutdown in {railway_lifecycle.IDLE_TIMEOUT_MINUTES} minutes if no new activity occurs.",
+                    flush=True
+                )
     except Exception as e:
         print(f"[Auto-Report Error] Could not dispatch auto-report: {e}")
 
