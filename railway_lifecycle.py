@@ -56,6 +56,7 @@ def ensure_wake_webhook_registered() -> str:
     configured_worker_url = (
         os.getenv("WAKE_WEBHOOK_URL", "").strip()
         or os.getenv("CLOUDFLARE_WORKER_URL", "").strip()
+        or "https://telegram-stream-scout.matthewobanla.workers.dev"
     )
     info_url = f"https://api.telegram.org/bot{bot_token}/getWebhookInfo"
     try:

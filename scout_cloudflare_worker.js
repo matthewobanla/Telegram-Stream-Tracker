@@ -18,11 +18,35 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Simple health check in browser
+    // Simple health check or diagnostic wake test in browser
     if (request.method === "GET") {
+      if (url.pathname === "/test-wake") {
+        try {
+          const res = await wakeRailwayService(
+            env.RAILWAY_API_TOKEN,
+            env.RAILWAY_SERVICE_ID,
+            env.RAILWAY_ENVIRONMENT_ID
+          );
+          return new Response(JSON.stringify({ ok: true, railway: res }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        } catch (err) {
+          return new Response(JSON.stringify({ ok: false, error: err.message }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+
       return new Response(JSON.stringify({
         status: "ok",
         service: "telegram-railway-wake-scout",
+        configured: {
+          has_railway_token: Boolean(env.RAILWAY_API_TOKEN),
+          has_service_id: Boolean(env.RAILWAY_SERVICE_ID),
+          has_environment_id: Boolean(env.RAILWAY_ENVIRONMENT_ID),
+          has_bot_token: Boolean(env.BOT_TOKEN)
+        },
         time: new Date().toISOString()
       }), {
         headers: { "Content-Type": "application/json" }
@@ -84,7 +108,10 @@ export default {
         if (botToken) {
           await sendTelegramMessage(botToken, chatId, "⚠️ **Wake-on-Call Scout Error:** Missing Railway API credentials in Cloudflare Worker settings.");
         }
-        return new Response("Missing Configuration", { status: 500 });
+        return new Response(JSON.stringify({ ok: false, error: "Missing Configuration" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
       }
 
       // 3. Check if Railway container is ALREADY online to prevent redundant wakes & messages
@@ -126,58 +153,77 @@ export default {
 
     } catch (err) {
       console.error("[Scout Fatal Error]", err);
-      return new Response(JSON.stringify({ error: err.message }), { status: 500 });
+      // Always return HTTP 200 to Telegram so the Bot Webhook queue does not stall on retries
+      return new Response(JSON.stringify({ ok: false, error: err.message }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
     }
   }
 };
 
 /**
  * Triggers deployment/start of the Railway service instance.
+ * Tests Bearer (Account/Workspace Token) and Project-Access-Token (Project Token) separately
+ * across railway.com and railway.app endpoints.
  */
 async function wakeRailwayService(token, serviceId, environmentId) {
-  const query = `
-    mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
+  const cleanToken = (token || "").trim();
+  const cleanServiceId = (serviceId || "").trim();
+  const cleanEnvId = (environmentId || "").trim();
+
+  const mutations = [
+    `mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
       serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
-    }
-  `;
+    }`,
+    `mutation ServiceInstanceDeploy($serviceId: String!, $environmentId: String!) {
+      serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
+    }`
+  ];
 
   const endpoints = [
-    "https://backboard.railway.app/graphql/v2",
-    "https://backboard.railway.com/graphql/v2"
+    "https://backboard.railway.com/graphql/v2",
+    "https://backboard.railway.app/graphql/v2"
+  ];
+
+  const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+  const authHeadersList = [
+    { "Authorization": `Bearer ${cleanToken}`, "User-Agent": userAgent, "Content-Type": "application/json" },
+    { "Project-Access-Token": cleanToken, "User-Agent": userAgent, "Content-Type": "application/json" }
   ];
 
   let lastError = null;
 
-  for (const ep of endpoints) {
-    try {
-      const response = await fetch(ep, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Project-Access-Token": token,
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          query,
-          variables: {
-            serviceId,
-            environmentId
+  for (const query of mutations) {
+    for (const ep of endpoints) {
+      for (const headers of authHeadersList) {
+        try {
+          const response = await fetch(ep, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              query,
+              variables: {
+                serviceId: cleanServiceId,
+                environmentId: cleanEnvId
+              }
+            })
+          });
+
+          const data = await response.json();
+          if (data.errors && data.errors.length > 0) {
+            lastError = new Error(data.errors.map(e => e.message).join(", "));
+            console.error(`[Railway GraphQL Error at ${ep}]`, data.errors);
+            continue;
           }
-        })
-      });
 
-      const data = await response.json();
-      if (data.errors && data.errors.length > 0) {
-        lastError = new Error(data.errors.map(e => e.message).join(", "));
-        console.error(`[Railway GraphQL Error at ${ep}]`, data.errors);
-        continue;
+          return data.data;
+        } catch (err) {
+          lastError = err;
+          console.error(`[Railway Network Error at ${ep}]`, err);
+        }
       }
-
-      return data.data;
-    } catch (err) {
-      lastError = err;
-      console.error(`[Railway Network Error at ${ep}]`, err);
     }
   }
 

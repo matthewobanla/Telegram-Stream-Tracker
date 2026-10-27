@@ -116,7 +116,7 @@ def set_webhook(worker_url):
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN is missing in .env")
         return
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={worker_url}&allowed_updates=[\"message\",\"channel_post\"]"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={worker_url}&drop_pending_updates=true&allowed_updates=[\"message\",\"channel_post\"]"
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = json.loads(resp.read().decode())
