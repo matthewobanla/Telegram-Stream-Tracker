@@ -49,19 +49,34 @@ def check_railway_token_validity() -> dict:
         return {"valid": False, "reason": "missing_token"}
     USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     ep = "https://backboard.railway.com/graphql/v2"
-    for mode, headers, query in [
-        ("Bearer (Account/Team)", {"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json", "User-Agent": USER_AGENT}, "query { me { id name } }"),
-        ("Project-Access-Token", {"Project-Access-Token": RAILWAY_API_TOKEN, "Content-Type": "application/json", "User-Agent": USER_AGENT}, "query { projectToken { projectId environmentId } }"),
+    dep_query = """
+    query GetDeployments($projectId: String!, $serviceId: String!) {
+        deployments(input: { projectId: $projectId, serviceId: $serviceId }, first: 1) {
+            edges { node { id status } }
+        }
+    }
+    """
+    errors_seen = {}
+    for mode, headers, payload in [
+        ("Bearer_me", {"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json", "User-Agent": USER_AGENT}, {"query": "query { me { id name } }"}),
+        ("Bearer_deployments", {"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json", "User-Agent": USER_AGENT}, {"query": dep_query, "variables": {"projectId": RAILWAY_PROJECT_ID, "serviceId": RAILWAY_SERVICE_ID}}),
+        ("ProjectToken_info", {"Project-Access-Token": RAILWAY_API_TOKEN, "Content-Type": "application/json", "User-Agent": USER_AGENT}, {"query": "query { projectToken { projectId environmentId } }"}),
+        ("ProjectToken_deployments", {"Project-Access-Token": RAILWAY_API_TOKEN, "Content-Type": "application/json", "User-Agent": USER_AGENT}, {"query": dep_query, "variables": {"projectId": RAILWAY_PROJECT_ID, "serviceId": RAILWAY_SERVICE_ID}}),
     ]:
         try:
-            req = urllib.request.Request(ep, data=json.dumps({"query": query}).encode("utf-8"), headers=headers)
+            req = urllib.request.Request(ep, data=json.dumps(payload).encode("utf-8"), headers=headers)
             with urllib.request.urlopen(req, timeout=8) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
-                if "data" in res and not res.get("errors"):
+                if "data" in res and res["data"] and not res.get("errors"):
                     return {"valid": True, "auth_mode": mode, "data": res["data"]}
+                errors_seen[mode] = [e.get("message") for e in res.get("errors", [])]
         except Exception as e:
-            pass
-    return {"valid": False, "reason": "not_authorized"}
+            errors_seen[mode] = str(e)
+    return {
+        "valid": False,
+        "token_len": len(RAILWAY_API_TOKEN),
+        "errors": errors_seen
+    }
 
 def ensure_wake_webhook_registered() -> str:
     """
