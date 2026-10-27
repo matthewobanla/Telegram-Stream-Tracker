@@ -43,6 +43,26 @@ def is_railway_environment() -> bool:
     """Detects if running inside a Railway container."""
     return bool(RAILWAY_DEPLOYMENT_ID or RAILWAY_SERVICE_ID or os.getenv("RAILWAY_STATIC_URL"))
 
+def check_railway_token_validity() -> dict:
+    """Tests RAILWAY_API_TOKEN against Railway GraphQL API and returns diagnostic details."""
+    if not RAILWAY_API_TOKEN:
+        return {"valid": False, "reason": "missing_token"}
+    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ep = "https://backboard.railway.com/graphql/v2"
+    for mode, headers, query in [
+        ("Bearer (Account/Team)", {"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json", "User-Agent": USER_AGENT}, "query { me { id name } }"),
+        ("Project-Access-Token", {"Project-Access-Token": RAILWAY_API_TOKEN, "Content-Type": "application/json", "User-Agent": USER_AGENT}, "query { projectToken { projectId environmentId } }"),
+    ]:
+        try:
+            req = urllib.request.Request(ep, data=json.dumps({"query": query}).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if "data" in res and not res.get("errors"):
+                    return {"valid": True, "auth_mode": mode, "data": res["data"]}
+        except Exception as e:
+            pass
+    return {"valid": False, "reason": "not_authorized"}
+
 def ensure_wake_webhook_registered() -> str:
     """
     Checks Telegram Bot API getWebhookInfo. If WAKE_WEBHOOK_URL or CLOUDFLARE_WORKER_URL
