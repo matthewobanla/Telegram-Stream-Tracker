@@ -378,13 +378,13 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
     if target_str.startswith("@"):
         try:
             entity = await user_client.get_entity(target_str)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Target Resolve Notice] Direct @ lookup for '{target_str}' failed: {e}", flush=True)
     elif username_hint:
         try:
             entity = await user_client.get_entity(f"@{username_hint}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Target Resolve Notice] Username hint lookup for '@{username_hint}' failed: {e}", flush=True)
 
     # 2. Try direct resolution by numeric ID or title
     if not entity:
@@ -395,7 +395,8 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
 
         try:
             entity = await user_client.get_entity(lookup)
-        except Exception:
+        except Exception as e:
+            print(f"[Target Resolve Notice] Direct ID lookup for '{lookup}' failed: {e}", flush=True)
             # 3. If direct resolution failed, populate dialogs cache on user_client and search
             try:
                 dialogs = await user_client.get_dialogs(limit=250)
@@ -411,7 +412,7 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
                         entity = d.entity
                         break
             except Exception as de:
-                print(f"[Dialog Search Notice] {de}")
+                print(f"[Dialog Search Notice] Dialogs lookup error: {de}", flush=True)
 
     # 4. If resolved with user_client
     if entity:
@@ -430,7 +431,7 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
             tracked_targets_map[f"@{username.lower()}"] = info
             tracked_targets_map[username.lower()] = info
 
-        print(f"[Tracked Group Added] ✅ '{title}' (ID: {entity_id_str}, Target: {formatted_target})")
+        print(f"[Tracked Group Added] ✅ '{title}' (ID: {entity_id_str}, Target: {formatted_target})", flush=True)
         return True, f"✅ Successfully added group: **{title}** (`{formatted_target}`)"
 
     # 5. Fallback if user_client cannot resolve yet, but we have chat_hint from bot
@@ -449,9 +450,10 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
         if username:
             tracked_targets_map[f"@{username.lower()}"] = info
 
-        print(f"[Tracked Group Added via Bot Hint] ✅ '{title}' (ID: {entity_id_str})")
+        print(f"[Tracked Group Added via Bot Hint] ✅ '{title}' (ID: {entity_id_str})", flush=True)
         return True, f"✅ Successfully registered group: **{title}** (`{formatted_target}`)\n\n_Note: Please ensure your user account is also a member of this group so it can listen to live voice calls._"
 
+    print(f"[Tracked Group Notice] ⚠️ Could not resolve target '{target_str}'. Ensure the user account is a member of the group.", flush=True)
     return False, f"⚠️ Could not resolve target `{target_str}`.\n_Ensure the user account is a member of the group or invite the bot to the group and use `/trackhere`._"
 
 async def untrack_target(target_val):
@@ -1840,6 +1842,10 @@ async def background_poll_loop():
         try:
             current_tracked = list(tracked_entities.values())
             if not current_tracked:
+                # Log periodic heartbeat so operator knows monitor is active
+                now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+                if now_ts % 30 < 9:
+                    print("[Stream Monitor] ⏳ Waiting for tracked groups to resolve. Current tracked: 0", flush=True)
                 await asyncio.sleep(8)
                 continue
 
@@ -1851,10 +1857,10 @@ async def background_poll_loop():
                 try:
                     if isinstance(entity, (types.Channel, types.InputChannel, types.InputPeerChannel)):
                         full_chat_res = await user_client(functions.channels.GetFullChannelRequest(channel=entity))
-                        group_call = full_chat_res.full_chat.call
+                        group_call = getattr(getattr(full_chat_res, "full_chat", None), "call", None)
                     else:
                         full_chat_res = await user_client(functions.messages.GetFullChatRequest(chat_id=entity.id))
-                        group_call = full_chat_res.full_chat.call
+                        group_call = getattr(getattr(full_chat_res, "full_chat", None), "call", None)
 
                     active_tracker = tracker_manager.get_tracker_for_chat(chat_id_str)
 
@@ -1929,18 +1935,22 @@ async def background_poll_loop():
                         if active_tracker:
                             active_tracker.consecutive_empty_polls += 1
                             if active_tracker.consecutive_empty_polls >= POLL_MISS_THRESHOLD:
-                                print(f"\n[Polling Notice] Confirmed call ended for [{chat_title}] ({active_tracker.consecutive_empty_polls}/{POLL_MISS_THRESHOLD} checks). Finalizing stream...")
+                                print(f"\n[Polling Notice] Confirmed call ended for [{chat_title}] ({active_tracker.consecutive_empty_polls}/{POLL_MISS_THRESHOLD} checks). Finalizing stream...", flush=True)
                                 call_id = active_tracker.active_call_id
                                 ended_stream_id, csv_file = tracker_manager.end_call_by_id(call_id)
                                 audio_file = await audio_recorder.recorder_instance.stop_recording(call_id)
                                 if ended_stream_id and AUTO_POST_REPORT:
                                     asyncio.create_task(send_auto_report(csv_file, expected_stream_id=ended_stream_id, group_entity=entity, chat_title=chat_title, audio_path=audio_file))
                             else:
-                                print(f"[Polling Notice] Call not detected in full chat info for [{chat_title}] ({active_tracker.consecutive_empty_polls}/{POLL_MISS_THRESHOLD} checks). Verifying before ending...")
+                                print(f"[Polling Notice] Call not detected in full chat info for [{chat_title}] ({active_tracker.consecutive_empty_polls}/{POLL_MISS_THRESHOLD} checks). Verifying before ending...", flush=True)
+                        else:
+                            # Periodic heartbeat when watching groups with no call active
+                            now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+                            if now_ts % 60 < 9:
+                                print(f"[Stream Monitor Heartbeat] Actively watching '{chat_title}' (No live voice call detected in group).", flush=True)
 
                 except Exception as pe:
-                    # Individual chat poll error (e.g. temporary network or permission)
-                    pass
+                    print(f"[Stream Monitor Polling Notice] Error checking group '{chat_title}': {type(pe).__name__}: {pe}", flush=True)
 
         except Exception as e:
             print(f"[Polling Notice] {type(e).__name__}: {e}")

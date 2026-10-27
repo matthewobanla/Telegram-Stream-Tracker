@@ -513,62 +513,62 @@ def sync_all_csv_reports_to_db(reports_dir=None):
                     clean_name = os.path.splitext(fname)[0]
                     stream_id = f"stream_{clean_name}"
 
-                c.execute("SELECT COUNT(*) FROM streams WHERE stream_id = ? OR start_time = ? OR csv_path = ?", (stream_id, start_time_iso, filepath))
-                if c.fetchone()[0] > 0:
-                    continue
-            
-            try:
-                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-                    reader = list(csv.DictReader(f))
-                    if not reader:
+                    c.execute("SELECT COUNT(*) FROM streams WHERE stream_id = ? OR start_time = ? OR csv_path = ?", (stream_id, start_time_iso, filepath))
+                    if c.fetchone()[0] > 0:
                         continue
-                    
-                    total_participants = len(reader)
-                    max_dur_min = 0.0
-                    for row in reader:
-                        try:
-                            d = float(row.get("Total Duration (Minutes)", 0) or 0)
-                            if d > max_dur_min:
-                                max_dur_min = d
-                        except Exception:
-                            pass
-                    
-                    duration_sec = max_dur_min * 60.0 if max_dur_min > 0 else 60.0
-
-                    title_match = re.search(r"report_\d{8}_\d{6}_(.+)\.csv", fname)
-                    if title_match:
-                        chat_title = title_match.group(1).replace("_", " ").strip()
-                    else:
-                        chat_title = "CHURCH IS HERE |||| KINGS' HUB BC"
-                    
-                    chat_id = "4399983308" if "FGC" in chat_title else "1335265990"
-                    
-                    c.execute("""
-                    INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, chat_id, start_time, end_time, duration_sec, total_participants, csv_path, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    """, (stream_id, stream_id, chat_title, chat_id, start_time_iso, start_time_iso, duration_sec, total_participants, filepath))
-                    
-                    for row in reader:
-                        try:
-                            uid = int(row.get("User ID", 0) or 0)
-                            if not uid:
+                
+                    try:
+                        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                            reader = list(csv.DictReader(f))
+                            if not reader:
                                 continue
-                            name = row.get("Name", "")
-                            uname = row.get("Username", "")
-                            fjoin = row.get("First Join (UTC)", "")
-                            lleave = row.get("Last Leave (UTC)", "")
-                            scount = int(row.get("Session Count", 1) or 1)
-                            tmin = float(row.get("Total Duration (Minutes)", 0) or 0)
-                            pct = float(row.get("Participation (%)", 0) or 0)
+                            
+                            total_participants = len(reader)
+                            max_dur_min = 0.0
+                            for row in reader:
+                                try:
+                                    d = float(row.get("Total Duration (Minutes)", 0) or 0)
+                                    if d > max_dur_min:
+                                        max_dur_min = d
+                                except Exception:
+                                    pass
+                            
+                            duration_sec = max_dur_min * 60.0 if max_dur_min > 0 else 60.0
+
+                            title_match = re.search(r"report_\d{8}_\d{6}_(.+)\.csv", fname)
+                            if title_match:
+                                chat_title = title_match.group(1).replace("_", " ").strip()
+                            else:
+                                chat_title = "CHURCH IS HERE |||| KINGS' HUB BC"
+                            
+                            chat_id = "4399983308" if "FGC" in chat_title else "1335265990"
                             
                             c.execute("""
-                            INSERT OR REPLACE INTO participants (stream_id, user_id, name, username, first_join, last_leave, session_count, total_sec, total_min, pct, is_online)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                            """, (stream_id, uid, name, uname, fjoin, lleave, scount, tmin * 60.0, tmin, pct))
-                        except Exception:
-                            pass
-            except Exception as e:
-                print(f"[DB Sync CSV Notice] Failed to sync {fname}: {e}")
+                            INSERT OR REPLACE INTO streams (stream_id, call_id, chat_title, chat_id, start_time, end_time, duration_sec, total_participants, csv_path, is_active)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                            """, (stream_id, stream_id, chat_title, chat_id, start_time_iso, start_time_iso, duration_sec, total_participants, filepath))
+                            
+                            for row in reader:
+                                try:
+                                    uid = int(row.get("User ID", 0) or 0)
+                                    if not uid:
+                                        continue
+                                    name = row.get("Name", "")
+                                    uname = row.get("Username", "")
+                                    fjoin = row.get("First Join (UTC)", "")
+                                    lleave = row.get("Last Leave (UTC)", "")
+                                    scount = int(row.get("Session Count", 1) or 1)
+                                    tmin = float(row.get("Total Duration (Minutes)", 0) or 0)
+                                    pct = float(row.get("Participation (%)", 0) or 0)
+                                    
+                                    c.execute("""
+                                    INSERT OR REPLACE INTO participants (stream_id, user_id, name, username, first_join, last_leave, session_count, total_sec, total_min, pct, is_online)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                                    """, (stream_id, uid, name, uname, fjoin, lleave, scount, tmin * 60.0, tmin, pct))
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        print(f"[DB Sync CSV Notice] Failed to sync {fname}: {e}")
 
 def finalize_dangling_streams(exclude_stream_ids=None):
     """Auto-recovers and finalizes any dangling or interrupted active streams in the database."""
