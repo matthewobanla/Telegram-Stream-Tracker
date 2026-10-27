@@ -423,6 +423,7 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
 
         db.add_tracked_group(formatted_target, title=title, entity_id=entity_id_str, added_by=str(added_by))
 
+        already_tracked = entity_id_str in tracked_entities
         info = {"target": formatted_target, "entity": entity, "title": title, "entity_id": entity_id_str}
         tracked_entities[entity_id_str] = info
         tracked_targets_map[formatted_target.lower()] = info
@@ -431,7 +432,8 @@ async def resolve_and_add_target(target_val, added_by="Owner", chat_hint=None):
             tracked_targets_map[f"@{username.lower()}"] = info
             tracked_targets_map[username.lower()] = info
 
-        print(f"[Tracked Group Added] ✅ '{title}' (ID: {entity_id_str}, Target: {formatted_target})", flush=True)
+        if not already_tracked:
+            print(f"[Tracked Group Added] ✅ '{title}' (ID: {entity_id_str}, Target: {formatted_target})", flush=True)
         return True, f"✅ Successfully added group: **{title}** (`{formatted_target}`)"
 
     # 5. Fallback if user_client cannot resolve yet, but we have chat_hint from bot
@@ -2182,9 +2184,14 @@ async def main():
 
         # Load all tracked groups from Database
         db_groups = db.get_tracked_groups()
-        print(f"\nResolving {len(db_groups)} tracked target group(s)...")
+        seen_keys = set()
+        print(f"\nResolving tracked target group(s)...")
         for g in db_groups:
             target = g.get("target") or g.get("entity_id")
+            norm_key = str(g.get("entity_id") or target or "").replace("-100", "").replace("-", "").strip().lower()
+            if norm_key in seen_keys:
+                continue
+            seen_keys.add(norm_key)
             if target:
                 await resolve_and_add_target(target, added_by=g.get("added_by", "Database"))
 

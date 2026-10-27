@@ -173,6 +173,15 @@ def init_db():
             c.execute("DELETE FROM streams WHERE stream_id = 'stream_livestream_attendance_report'")
             c.execute("DELETE FROM participants WHERE stream_id = 'stream_livestream_attendance_report'")
             c.execute("DELETE FROM admin_recipients WHERE added_by = 'Group Admin Sync'")
+            # Deduplicate tracked_groups table by normalized ID/target
+            c.execute("""
+            DELETE FROM tracked_groups 
+            WHERE id NOT IN (
+                SELECT MIN(id) 
+                FROM tracked_groups 
+                GROUP BY REPLACE(REPLACE(COALESCE(NULLIF(entity_id, ''), target), '-100', ''), '-', '')
+            )
+            """)
         except Exception:
             pass
 
@@ -191,10 +200,37 @@ def add_tracked_group(target, title="", entity_id="", added_by="Owner"):
     target = str(target).strip()
     if not target:
         return False
+    clean_target = target.replace("-100", "").replace("-", "") if (target.startswith("-100") or target.startswith("-")) else target
+    clean_eid = str(entity_id).replace("-100", "").replace("-", "") if entity_id else (clean_target if clean_target.isdigit() else "")
+
     with get_connection() as conn:
         c = conn.cursor()
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
         try:
+            # Check if this group already exists under another format (raw ID or -100 ID)
+            if clean_eid:
+                c.execute("""
+                SELECT id, target FROM tracked_groups 
+                WHERE entity_id = ? OR target = ? OR target = ? OR target = ?
+                """, (clean_eid, clean_eid, f"-100{clean_eid}", f"-{clean_eid}"))
+                matches = c.fetchall()
+                if matches:
+                    primary_id = matches[0]["id"]
+                    target_to_save = target if target.startswith("@") else matches[0]["target"]
+                    c.execute("""
+                    UPDATE tracked_groups 
+                    SET target = ?, 
+                        title = CASE WHEN ? != '' THEN ? ELSE title END,
+                        entity_id = ?,
+                        added_by = ?,
+                        is_active = 1
+                    WHERE id = ?
+                    """, (target_to_save, title, title, clean_eid, str(added_by), primary_id))
+                    if len(matches) > 1:
+                        dup_ids = [str(m["id"]) for m in matches[1:]]
+                        c.execute(f"DELETE FROM tracked_groups WHERE id IN ({','.join(dup_ids)})")
+                    return True
+
             c.execute("""
             INSERT INTO tracked_groups (target, title, entity_id, added_by, added_at, is_active)
             VALUES (?, ?, ?, ?, ?, 1)
@@ -202,7 +238,7 @@ def add_tracked_group(target, title="", entity_id="", added_by="Owner"):
                 title = CASE WHEN excluded.title != '' THEN excluded.title ELSE tracked_groups.title END,
                 entity_id = CASE WHEN excluded.entity_id != '' THEN excluded.entity_id ELSE tracked_groups.entity_id END,
                 is_active = 1
-            """, (target, title, str(entity_id) if entity_id else "", str(added_by), now_str))
+            """, (target, title, str(clean_eid or entity_id or ""), str(added_by), now_str))
             return True
         except Exception as e:
             print(f"[DB Add Group Error] {e}")
