@@ -128,8 +128,8 @@ class CallSessionTracker:
         self.consecutive_empty_polls = 0
 
         db.save_stream_start(self.active_stream_id, call_id, chat_title, now, chat_id=self.chat_id)
-        print(f"\n[LIVE STREAM STARTED] [{self.chat_title}] Stream ID: {self.active_stream_id} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        print("Monitoring participant join/leave events...\n")
+        print(f"\n[LIVE STREAM STARTED] [{self.chat_title}] Stream ID: {self.active_stream_id} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}", flush=True)
+        print("Monitoring participant join/leave events...\n", flush=True)
 
     def register_join(self, user_id: int, name: str, username: str = ""):
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -142,7 +142,7 @@ class CallSessionTracker:
                 "current_join": now
             }
             uname_str = f" (@{username})" if username else ""
-            print(f" [+] JOIN [{self.chat_title}]: {name}{uname_str} [ID: {user_id}] at {now.strftime('%H:%M:%S UTC')} (Total: {len(self.participants)})")
+            print(f" [+] JOIN [{self.chat_title}]: {name}{uname_str} [ID: {user_id}] at {now.strftime('%H:%M:%S UTC')} (Total: {len(self.participants)})", flush=True)
             state_changed = True
         else:
             if name and not name.startswith("Participant ") and not name.startswith("User "):
@@ -153,14 +153,14 @@ class CallSessionTracker:
             if self.participants[user_id]["current_join"] is None:
                 self.participants[user_id]["current_join"] = now
                 uname_str = f" (@{self.participants[user_id]['username']})" if self.participants[user_id]['username'] else ""
-                print(f" [+] REJOIN [{self.chat_title}]: {self.participants[user_id]['name']}{uname_str} [ID: {user_id}] at {now.strftime('%H:%M:%S UTC')}")
+                print(f" [+] REJOIN [{self.chat_title}]: {self.participants[user_id]['name']}{uname_str} [ID: {user_id}] at {now.strftime('%H:%M:%S UTC')}", flush=True)
                 state_changed = True
 
         if state_changed:
             try:
                 db.save_participant_join(self.active_stream_id, user_id, self.participants[user_id]["name"], self.participants[user_id]["username"], now)
             except Exception as e:
-                print(f"[DB Join Error] {e}")
+                print(f"[DB Join Error] {e}", flush=True)
 
     def register_leave(self, user_id: int):
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -170,11 +170,11 @@ class CallSessionTracker:
             self.participants[user_id]["current_join"] = None
             session_duration_sec = (now - join_time).total_seconds()
             uname_str = f" (@{self.participants[user_id]['username']})" if self.participants[user_id]['username'] else ""
-            print(f" [-] LEAVE [{self.chat_title}]: {self.participants[user_id]['name']}{uname_str} at {now.strftime('%H:%M:%S UTC')} (Session: {session_duration_sec/60:.1f} min)")
+            print(f" [-] LEAVE [{self.chat_title}]: {self.participants[user_id]['name']}{uname_str} at {now.strftime('%H:%M:%S UTC')} (Session: {session_duration_sec/60:.1f} min)", flush=True)
             try:
                 db.save_participant_leave(self.active_stream_id, user_id, now)
             except Exception as e:
-                print(f"[DB Leave Error] {e}")
+                print(f"[DB Leave Error] {e}", flush=True)
 
     def end_call(self):
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -185,7 +185,7 @@ class CallSessionTracker:
                 pdata["sessions"].append((pdata["current_join"], now))
                 pdata["current_join"] = None
 
-        print(f"\n[LIVE STREAM ENDED] [{self.chat_title}] Ended at: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        print(f"\n[LIVE STREAM ENDED] [{self.chat_title}] Ended at: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}", flush=True)
         csv_file = self.generate_csv()
         db.save_stream_end(self.active_stream_id, now, csv_file)
         self.last_csv_path = csv_file
@@ -871,8 +871,8 @@ async def send_auto_report(csv_path, expected_stream_id=None, group_entity=None,
                 print(f"[Auto-Report Notice] Could not send to admin {target}: {e}")
                 print(f"                     (Ensure admin sent /start to the bot once in private DM)")
 
-        # Trigger post-stream container shutdown on Railway if enabled
-        if railway_lifecycle.is_railway_environment() or os.getenv("RAILWAY_AUTO_SHUTDOWN"):
+        # Trigger post-stream container shutdown on Railway if enabled and no other stream is active
+        if (railway_lifecycle.is_railway_environment() or os.getenv("RAILWAY_AUTO_SHUTDOWN")) and len(tracker_manager.get_all_active()) == 0:
             asyncio.create_task(railway_lifecycle.trigger_post_stream_shutdown())
     except Exception as e:
         print(f"[Auto-Report Error] Could not dispatch auto-report: {e}")
@@ -1478,7 +1478,7 @@ async def bot_command_handler(event):
             "The Scout will wake it up automatically when the next livestream begins (or via `/wake`).",
             parse_mode="markdown"
         )
-        asyncio.create_task(railway_lifecycle.trigger_post_stream_shutdown(delay_seconds=3))
+        asyncio.create_task(railway_lifecycle.trigger_post_stream_shutdown(delay_seconds=3, force=True))
         return
 
     # 1. GROUP MANAGEMENT COMMANDS
@@ -1933,6 +1933,14 @@ async def background_poll_loop():
                             if uid not in active_uids and active_tracker.participants[uid]["current_join"] is not None:
                                 active_tracker.register_leave(uid)
 
+                        now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+                        if now_ts % 60 < 9:
+                            print(
+                                f"[Live Stream Heartbeat] 🔴 Actively tracking '{chat_title}' — "
+                                f"{len(active_uids)} online / {len(active_tracker.participants)} total participants.",
+                                flush=True
+                            )
+
                     else:
                         if active_tracker:
                             active_tracker.consecutive_empty_polls += 1
@@ -2173,10 +2181,11 @@ async def main():
                 uname = getattr(user_me, "username", "") or "NoUsername"
                 print(f"[Stream Monitor] : Connected as {first_name} (@{uname})")
                 try:
-                    print("[Stream Monitor] : Loading dialogs & caching group entities...")
+                    print("[Stream Monitor] : Loading dialogs & caching group entities...", flush=True)
                     await user_client.get_dialogs(limit=250)
+                    await sync_bot_dialogs()
                 except Exception as de:
-                    print(f"[Dialogs Cache Notice] {de}")
+                    print(f"[Dialogs Cache Notice] {de}", flush=True)
                 break
             except Exception as e:
                 print(f"[User Client Connect Retry] {e}. Retrying in 5s...")
