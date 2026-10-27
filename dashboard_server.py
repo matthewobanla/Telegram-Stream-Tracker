@@ -1014,6 +1014,9 @@ def create_app():
                 return await handler(request)
 
             path = request.path
+            # Mark web activity for dashboard requests
+            railway_lifecycle.mark_web_activity()
+
             # Allow public index, static assets, health check, and auth endpoints
             if not path.startswith("/api/") or path.startswith("/api/auth/") or path == "/api/health" or path == "/api/status":
                 return await handler(request)

@@ -27,14 +27,17 @@ if sys.platform == "win32":
 SESSION_STRING = os.getenv("SESSION_STRING", getattr(config, "SESSION_STRING", "")).strip().strip("'").strip('"')
 SESSION_B64 = os.getenv("SESSION_B64", getattr(config, "SESSION_B64", "")).strip().strip("'").strip('"')
 
+SESSION_PATH = os.path.join(config.DATA_DIR, "tracker_session") if getattr(config, "DATA_DIR", "") else "tracker_session"
+
 if SESSION_STRING:
     print(f"[Session Loader] Configured SESSION_STRING ({len(SESSION_STRING)} chars, prefix: '{SESSION_STRING[:12]}...').")
 elif SESSION_B64:
     try:
         decoded_bytes = base64.b64decode(SESSION_B64)
-        with open("tracker_session.session", "wb") as f:
+        target_session_file = f"{SESSION_PATH}.session"
+        with open(target_session_file, "wb") as f:
             f.write(decoded_bytes)
-        print(f"[Session Loader] Successfully restored tracker_session.session ({len(decoded_bytes)} bytes) from SESSION_B64.")
+        print(f"[Session Loader] Successfully restored {target_session_file} ({len(decoded_bytes)} bytes) from SESSION_B64.")
     except Exception as e:
         print(f"[Session Loader Error] Could not decode SESSION_B64: {e}")
 
@@ -44,7 +47,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", getattr(config, "BOT_TOKEN", ""))
 BOT_ID = int(BOT_TOKEN.split(":")[0]) if BOT_TOKEN and ":" in str(BOT_TOKEN) else None
 TARGET_CHAT_ENV = os.getenv("TARGET_CHAT", config.TARGET_CHAT)
 AUTO_POST_REPORT = bool(os.getenv("AUTO_POST_REPORT", getattr(config, "AUTO_POST_REPORT", True)))
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", getattr(config, "ADMIN_CHAT_ID", "@KingmattMO"))
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", getattr(config, "ADMIN_CHAT_ID", ""))
 AUTO_POST_TO_GROUP = bool(os.getenv("AUTO_POST_TO_GROUP", getattr(config, "AUTO_POST_TO_GROUP", False)))
 CSV_OUTPUT_DIR = os.getenv("CSV_OUTPUT_DIR", config.CSV_OUTPUT_DIR)
 MIN_ATTENDANCE_SECONDS = int(os.getenv("MIN_ATTENDANCE_SECONDS", getattr(config, "MIN_ATTENDANCE_SECONDS", 30)))
@@ -61,11 +64,25 @@ if SESSION_STRING:
     user_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH, connection_retries=None, auto_reconnect=True)
     print(f"[Session Loader] Initialized Telegram client using SESSION_STRING.")
 else:
-    user_client = TelegramClient("tracker_session", API_ID, API_HASH, connection_retries=None, auto_reconnect=True)
-    print(f"[Session Loader] Initialized Telegram client using local 'tracker_session.session' file.")
+    user_client = TelegramClient(SESSION_PATH, API_ID, API_HASH, connection_retries=None, auto_reconnect=True)
+    print(f"[Session Loader] Initialized Telegram client using local '{SESSION_PATH}.session' file.")
 
 bot_client = TelegramClient(MemorySession(), API_ID, API_HASH, connection_retries=None, auto_reconnect=True)
 bot_active = False
+
+async def _graceful_telethon_cleanup():
+    try:
+        if user_client and user_client.is_connected():
+            await user_client.disconnect()
+    except Exception:
+        pass
+    try:
+        if bot_client and bot_client.is_connected():
+            await bot_client.disconnect()
+    except Exception:
+        pass
+
+railway_lifecycle.register_cleanup_callback(_graceful_telethon_cleanup)
 
 # Global cache for entity name resolution
 entity_cache = {}
@@ -1038,15 +1055,14 @@ async def is_sender_admin_or_owner(event):
 # --- INLINE KEYBOARD BUTTON CALLBACK HANDLER ---
 @bot_client.on(events.CallbackQuery)
 async def bot_callback_handler(event):
-    # Restrict button interactions in groups to administrators
-    if not event.is_private:
-        is_admin = await is_sender_admin_or_owner(event)
-        if not is_admin:
-            try:
-                await event.answer("⛔️ Only group administrators can use these controls.", alert=True)
-            except Exception:
-                pass
-            return
+    # Restrict button interactions to authorized administrators
+    is_admin = await is_sender_admin_or_owner(event)
+    if not is_admin:
+        try:
+            await event.answer("⛔️ Only authorized administrators can use these controls.", alert=True)
+        except Exception:
+            pass
+        return
 
     data = event.data
     try:
@@ -2170,16 +2186,20 @@ async def main():
         print("  Auto-generates attendance CSV reports on stream end.")
         print("  Permanently persists all sessions to SQLite database.\n")
 
-    # 1. Connect user client and resolve group targets
-    await connect_user_client_and_targets()
+    # 1. Connect user client and resolve group targets in background task
+    user_connect_task = asyncio.create_task(connect_user_client_and_targets())
 
     # 2. Start background poll loop & idle watchdog tasks
     poll_task = asyncio.create_task(background_poll_loop())
     watchdog_task = asyncio.create_task(railway_lifecycle.idle_watchdog_loop(tracker_manager))
 
+    tasks_to_wait = [poll_task]
+    if railway_lifecycle.AUTO_SHUTDOWN_ENABLED:
+        tasks_to_wait.append(watchdog_task)
+
     try:
         done, pending = await asyncio.wait(
-            [poll_task, watchdog_task],
+            tasks_to_wait,
             return_when=asyncio.FIRST_COMPLETED
         )
         for task in done:
@@ -2191,6 +2211,7 @@ async def main():
         print(f"[Notice] Main loop interrupted ({type(e).__name__}: {e})")
         raise
     finally:
+        user_connect_task.cancel()
         poll_task.cancel()
         watchdog_task.cancel()
         if dashboard_runner:
@@ -2198,6 +2219,10 @@ async def main():
                 await dashboard_runner.cleanup()
             except Exception:
                 pass
+        try:
+            await user_connect_task
+        except (asyncio.CancelledError, Exception):
+            pass
         try:
             await poll_task
         except (asyncio.CancelledError, Exception):

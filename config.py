@@ -21,8 +21,8 @@ TARGET_CHAT = os.getenv("TARGET_CHAT", "@YourGroupOrChannel")
 # Automatically post reports when a call ends
 AUTO_POST_REPORT = os.getenv("AUTO_POST_REPORT", "True").lower() in ("true", "1", "yes")
 
-# Admin Chat / User ID to receive the reports privately (e.g. '@KingmattMO' or '1067204907' or comma-separated)
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "@KingmattMO")
+# Admin Chat / User ID to receive the reports privately (e.g. '@YourAdmin' or '123456789' or comma-separated)
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 
 # Whether to also post the reports to the public group (Default: False)
 AUTO_POST_TO_GROUP = os.getenv("AUTO_POST_TO_GROUP", "False").lower() in ("true", "1", "yes")

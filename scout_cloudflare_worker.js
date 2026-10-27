@@ -33,6 +33,13 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
+    if (env.WEBHOOK_SECRET) {
+      const secretHeader = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+      if (secretHeader !== env.WEBHOOK_SECRET) {
+        return new Response("Forbidden", { status: 403 });
+      }
+    }
+
     try {
       const update = await request.json();
       const msg = update.message || update.channel_post;
@@ -134,28 +141,47 @@ async function wakeRailwayService(token, serviceId, environmentId) {
     }
   `;
 
-  const response = await fetch(RAILWAY_GRAPHQL_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      query,
-      variables: {
-        serviceId,
-        environmentId
-      }
-    })
-  });
+  const endpoints = [
+    "https://backboard.railway.app/graphql/v2",
+    "https://backboard.railway.com/graphql/v2"
+  ];
 
-  const data = await response.json();
-  if (data.errors) {
-    console.error("[Railway GraphQL Errors]", data.errors);
-    throw new Error(data.errors.map(e => e.message).join(", "));
+  let lastError = null;
+
+  for (const ep of endpoints) {
+    try {
+      const response = await fetch(ep, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Project-Access-Token": token,
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          query,
+          variables: {
+            serviceId,
+            environmentId
+          }
+        })
+      });
+
+      const data = await response.json();
+      if (data.errors && data.errors.length > 0) {
+        lastError = new Error(data.errors.map(e => e.message).join(", "));
+        console.error(`[Railway GraphQL Error at ${ep}]`, data.errors);
+        continue;
+      }
+
+      return data.data;
+    } catch (err) {
+      lastError = err;
+      console.error(`[Railway Network Error at ${ep}]`, err);
+    }
   }
 
-  return data.data;
+  throw lastError || new Error("Failed to redeploy Railway service");
 }
 
 /**

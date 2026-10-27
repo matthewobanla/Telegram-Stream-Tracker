@@ -880,7 +880,8 @@ document.addEventListener("DOMContentLoaded", () => {
       if (res.ok) {
         const data = await res.json();
         const rawMarkdown = data.summary || "";
-        box.innerHTML = window.marked ? window.marked.parse(rawMarkdown) : `<pre class="text-viewer-pre">${escapeHtml(rawMarkdown)}</pre>`;
+        const parsedHtml = window.marked ? window.marked.parse(rawMarkdown) : `<pre class="text-viewer-pre">${escapeHtml(rawMarkdown)}</pre>`;
+        box.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(parsedHtml) : parsedHtml;
       } else {
         box.innerHTML = `<p style="color:var(--color-neutral-700);">AI executive minutes not yet generated for this session.</p>`;
       }

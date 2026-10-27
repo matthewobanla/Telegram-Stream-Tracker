@@ -50,17 +50,21 @@ def get_admin_passkey():
 def get_authorized_identities():
     """
     Collects all authorized Telegram User IDs and Usernames from:
-    1. ALLOWED_TELEGRAM_IDS or ADMIN_USER_IDS env vars
-    2. ADMIN_CHAT_ID in env / config
-    3. admin_recipients in SQLite database (excluding legacy DM auto-enrollments)
-    4. Hardcoded owner fallback (Matthew Ọbańlá: 1067204907, KingmattMO)
+    1. OWNER_TELEGRAM_ID or OWNER_USERNAME in env
+    2. ALLOWED_TELEGRAM_IDS or ADMIN_USER_IDS env vars
+    3. ADMIN_CHAT_ID in env / config
+    4. admin_recipients in SQLite database (excluding legacy DM auto-enrollments)
     """
     authorized_ids = set()
     authorized_usernames = set()
 
-    # Always include Matthew Ọbańlá as owner
-    authorized_ids.add("1067204907")
-    authorized_usernames.add("kingmattmo")
+    # Env: OWNER_TELEGRAM_ID / OWNER_USERNAME
+    owner_id = os.getenv("OWNER_TELEGRAM_ID", "").strip()
+    if owner_id:
+        authorized_ids.add(owner_id)
+    owner_username = os.getenv("OWNER_USERNAME", "").strip().lower().lstrip("@")
+    if owner_username:
+        authorized_usernames.add(owner_username)
 
     # Env: ALLOWED_TELEGRAM_IDS / ADMIN_USER_IDS
     env_ids = os.getenv("ALLOWED_TELEGRAM_IDS", os.getenv("ADMIN_USER_IDS", ""))
@@ -282,14 +286,33 @@ def destroy_session(token):
     if token in ACTIVE_SESSIONS:
         del ACTIVE_SESSIONS[token]
 
+_cached_signing_key = None
+
 def get_signing_key():
+    global _cached_signing_key
     token = get_bot_token()
     if token:
         return token.encode("utf-8")
     api_hash = getattr(config, "API_HASH", "")
     if api_hash:
         return str(api_hash).encode("utf-8")
-    return b"tracker_operator_signature_key_fallback_2026"
+    if _cached_signing_key is None:
+        data_dir = getattr(config, "DATA_DIR", "") or ""
+        key_file = os.path.join(data_dir, ".device_signing_key") if data_dir else ".device_signing_key"
+        if os.path.exists(key_file):
+            try:
+                with open(key_file, "rb") as f:
+                    _cached_signing_key = f.read().strip()
+            except Exception:
+                pass
+        if not _cached_signing_key:
+            _cached_signing_key = secrets.token_bytes(32)
+            try:
+                with open(key_file, "wb") as f:
+                    f.write(_cached_signing_key)
+            except Exception:
+                pass
+    return _cached_signing_key
 
 def generate_device_token(user_id, username="", name=""):
     """

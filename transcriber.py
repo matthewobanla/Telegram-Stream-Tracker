@@ -70,6 +70,39 @@ def get_available_gemini_models(api_key):
         return discovered
     return []
 
+def upload_file_to_gemini(api_key, file_path, mime_type):
+    """Uploads large audio files (>20MB) to Google Gemini File API."""
+    file_size = os.path.getsize(file_path)
+    filename = os.path.basename(file_path)
+    init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}"
+    init_headers = {
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": str(file_size),
+        "X-Goog-Upload-Header-Content-Type": mime_type,
+        "Content-Type": "application/json"
+    }
+    init_data = json.dumps({"file": {"display_name": filename}}).encode("utf-8")
+    req = urllib.request.Request(init_url, data=init_data, headers=init_headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        upload_url = resp.headers.get("x-goog-upload-url") or resp.headers.get("X-Goog-Upload-URL")
+    if not upload_url:
+        raise RuntimeError("Gemini File API did not return an upload URL.")
+
+    with open(file_path, "rb") as f:
+        audio_bytes = f.read()
+
+    upload_headers = {
+        "Content-Length": str(file_size),
+        "X-Goog-Upload-Offset": "0",
+        "X-Goog-Upload-Command": "upload, finalize"
+    }
+    up_req = urllib.request.Request(upload_url, data=audio_bytes, headers=upload_headers)
+    with urllib.request.urlopen(up_req, timeout=180) as resp:
+        res = json.loads(resp.read().decode("utf-8"))
+        file_info = res.get("file", {})
+        return file_info.get("uri")
+
 # --- 1. GEMINI TRANSCRIBER & SUMMARIZER ---
 async def transcribe_and_summarize_gemini(audio_path, chat_title="Voice Stream"):
     """
@@ -96,10 +129,26 @@ async def transcribe_and_summarize_gemini(audio_path, chat_title="Voice Stream")
     }
     mime_type = mime_type_map.get(ext, "audio/mp3")
 
-    # If audio is small (< 20MB), upload directly via inlineData or File API
+    loop = asyncio.get_running_loop()
+    # If audio is small (<= 20MB), upload directly via inlineData; otherwise upload via File API
     import base64
-    with open(audio_path, "rb") as f:
-        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+    if file_size <= 20 * 1024 * 1024:
+        with open(audio_path, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+        audio_part = {
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": audio_b64
+            }
+        }
+    else:
+        file_uri = await loop.run_in_executor(None, upload_file_to_gemini, api_key, audio_path, mime_type)
+        audio_part = {
+            "file_data": {
+                "mime_type": mime_type,
+                "file_uri": file_uri
+            }
+        }
 
     prompt = f"""You are an expert AI meeting scribe and transcription assistant analyzing a recorded voice call from '{chat_title}'.
 
@@ -165,12 +214,7 @@ Please provide your output in TWO clearly separated sections:
     payload = {
         "contents": [{
             "parts": [
-                {
-                    "inline_data": {
-                        "mime_type": mime_type,
-                        "data": audio_b64
-                    }
-                },
+                audio_part,
                 {"text": prompt}
             ]
         }],
@@ -321,7 +365,13 @@ async def transcribe_openai(audio_path):
 async def transcribe_faster_whisper(audio_path):
     """Transcribes audio locally using faster-whisper (offline fallback)."""
     def _sync_local():
-        from faster_whisper import WhisperModel
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            raise RuntimeError(
+                "The 'faster-whisper' package is not installed in the current environment. "
+                "Install it using 'pip install faster-whisper' or switch to the 'gemini' or 'groq' engine."
+            )
         model = WhisperModel("base", device="cpu", compute_type="int8")
         segments, _ = model.transcribe(audio_path, beam_size=5)
         text = " ".join([seg.text for seg in segments])

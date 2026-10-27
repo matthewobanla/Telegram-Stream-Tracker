@@ -16,13 +16,13 @@ import urllib.error
 RAILWAY_GRAPHQL_URL = "https://backboard.railway.app/graphql/v2"
 
 # Configuration
+# Active by default: Shuts down container after IDLE_TIMEOUT_MINUTES of no stream or web activity
 AUTO_SHUTDOWN_ENABLED = os.getenv("RAILWAY_AUTO_SHUTDOWN", "True").lower() in ("true", "1", "yes")
-_raw_idle = os.getenv("IDLE_SHUTDOWN_MINUTES", "5").strip()
+_raw_idle = os.getenv("IDLE_SHUTDOWN_MINUTES", "15").strip()
 try:
-    _val = int(_raw_idle)
-    IDLE_TIMEOUT_MINUTES = 5 if _val == 15 else _val
+    IDLE_TIMEOUT_MINUTES = max(1, int(_raw_idle))
 except ValueError:
-    IDLE_TIMEOUT_MINUTES = 5
+    IDLE_TIMEOUT_MINUTES = 15
 
 # Railway Auto-injected or User-provided Variables
 RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN", "").strip()
@@ -35,11 +35,23 @@ RAILWAY_PROJECT_ID = os.getenv("RAILWAY_PROJECT_ID", "").strip()
 _stream_ever_detected = False
 _last_stream_end_time = None
 _boot_timestamp = datetime.datetime.now(datetime.timezone.utc)
+_last_web_activity_time = datetime.datetime.now(datetime.timezone.utc)
 _shutdown_in_progress = False
+_cleanup_callbacks = []
 
 def is_railway_environment() -> bool:
     """Detects if running inside a Railway container."""
     return bool(RAILWAY_DEPLOYMENT_ID or RAILWAY_SERVICE_ID or os.getenv("RAILWAY_STATIC_URL"))
+
+def register_cleanup_callback(cb):
+    """Registers an async or sync callback to run before container termination."""
+    if cb not in _cleanup_callbacks:
+        _cleanup_callbacks.append(cb)
+
+def mark_web_activity():
+    """Signals the idle watchdog that an operator is actively using the dashboard."""
+    global _last_web_activity_time
+    _last_web_activity_time = datetime.datetime.now(datetime.timezone.utc)
 
 def mark_stream_active():
     """Signals the idle guard that a real stream was active, preventing early idle shutdown."""
@@ -182,9 +194,17 @@ async def trigger_post_stream_shutdown(delay_seconds: int = 25):
         if not RAILWAY_API_TOKEN:
             print("[Railway Lifecycle WARNING] ⚠️ RAILWAY_API_TOKEN is not set in environment variables!")
             print("[Railway Lifecycle WARNING] Programmatic scale-to-zero requires RAILWAY_API_TOKEN in Railway service settings.")
-        print("[Railway Lifecycle] Exiting process with os._exit(0)...")
+    # Execute any registered cleanup callbacks before terminating process
+    for cb in _cleanup_callbacks:
+        try:
+            if asyncio.iscoroutinefunction(cb):
+                await cb()
+            else:
+                cb()
+        except Exception as e:
+            print(f"[Railway Lifecycle Cleanup Warning] {e}")
 
-    # Hard exit terminates process immediately even from background asyncio task
+    # Terminate process
     os._exit(0)
 
 async def idle_watchdog_loop(tracker_manager_ref):
@@ -192,11 +212,14 @@ async def idle_watchdog_loop(tracker_manager_ref):
     Monitors container uptime and idle activity:
     1. If no live stream begins within IDLE_TIMEOUT_MINUTES of boot, powers off the container.
     2. If a stream began and ended, and no new stream starts within 5 minutes, powers off the container.
+    3. Keeps container alive if an operator is actively using the web dashboard.
     """
     if not AUTO_SHUTDOWN_ENABLED:
-        return
+        print("[Railway Lifecycle] 🌐 Auto-shutdown is disabled. Web dashboard & tracker will stay online 24/7.")
+        while True:
+            await asyncio.sleep(3600)
 
-    print(f"[Railway Lifecycle] 🛡 Idle Watchdog active (Will power off in {IDLE_TIMEOUT_MINUTES}m if no stream starts).")
+    print(f"[Railway Lifecycle] 🛡 Idle Watchdog active (Will power off in {IDLE_TIMEOUT_MINUTES}m if no stream or web activity).")
 
     while True:
         try:
@@ -210,14 +233,19 @@ async def idle_watchdog_loop(tracker_manager_ref):
 
             now = datetime.datetime.now(datetime.timezone.utc)
 
+            # Prevent shutdown if an operator has interacted with the dashboard recently
+            web_idle_sec = (now - _last_web_activity_time).total_seconds()
+            if web_idle_sec < IDLE_TIMEOUT_MINUTES * 60:
+                continue
+
             # Scenario 1: A stream occurred earlier and has now concluded
             if _stream_ever_detected:
                 if _last_stream_end_time is None:
                     mark_stream_ended()
                 else:
                     idle_since_end = (now - _last_stream_end_time).total_seconds()
-                    if idle_since_end >= 5 * 60:
-                        print(f"\n[Railway Lifecycle] ⏰ Post-stream idle safety timeout reached (5 mins after call ended).")
+                    if idle_since_end >= IDLE_TIMEOUT_MINUTES * 60:
+                        print(f"\n[Railway Lifecycle] ⏰ Post-stream idle safety timeout reached ({IDLE_TIMEOUT_MINUTES} mins after call ended).")
                         print("[Railway Lifecycle] Shutting down container to conserve compute hours...")
                         await trigger_post_stream_shutdown(delay_seconds=5)
                         break
@@ -226,7 +254,7 @@ async def idle_watchdog_loop(tracker_manager_ref):
             # Scenario 2: Container booted up, but no stream started within IDLE_TIMEOUT_MINUTES
             uptime = (now - _boot_timestamp).total_seconds()
             if uptime >= IDLE_TIMEOUT_MINUTES * 60:
-                print(f"\n[Railway Lifecycle] ⏰ Idle timeout reached ({IDLE_TIMEOUT_MINUTES} mins without stream start).")
+                print(f"\n[Railway Lifecycle] ⏰ Idle timeout reached ({IDLE_TIMEOUT_MINUTES} mins without stream start or web activity).")
                 print("[Railway Lifecycle] Shutting down container to prevent idle cloud billing...")
                 await trigger_post_stream_shutdown(delay_seconds=5)
                 break

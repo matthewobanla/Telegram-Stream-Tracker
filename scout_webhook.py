@@ -23,6 +23,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN", "").strip()
 RAILWAY_SERVICE_ID = os.getenv("RAILWAY_SERVICE_ID", "").strip()
 RAILWAY_ENVIRONMENT_ID = os.getenv("RAILWAY_ENVIRONMENT_ID", "").strip()
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 
 def wake_railway():
     """Calls Railway GraphQL API to deploy/wake the tracking container."""
@@ -43,23 +44,33 @@ def wake_railway():
         }
     }
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        RAILWAY_GRAPHQL_ENDPOINT,
-        data=data,
-        headers={
-            "Authorization": f"Bearer {RAILWAY_API_TOKEN}",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            if "errors" in res:
-                return False, str(res["errors"])
-            return True, "Deployment triggered successfully"
-    except Exception as e:
-        return False, str(e)
+    endpoints = [
+        "https://backboard.railway.app/graphql/v2",
+        "https://backboard.railway.com/graphql/v2"
+    ]
+    last_err = ""
+    for ep in endpoints:
+        req = urllib.request.Request(
+            ep,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {RAILWAY_API_TOKEN}",
+                "Project-Access-Token": RAILWAY_API_TOKEN,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if "errors" in res and res["errors"]:
+                    last_err = str(res["errors"])
+                    continue
+                return True, "Deployment triggered successfully"
+        except Exception as e:
+            last_err = str(e)
+            continue
+    return False, last_err
 
 def send_telegram_alert(chat_id, text):
     """Sends a Telegram message notifying the group that the tracker is waking up."""
@@ -93,6 +104,15 @@ class ScoutWebhookHandler(BaseHTTPRequestHandler):
         }).encode("utf-8"))
 
     def do_POST(self):
+        if WEBHOOK_SECRET:
+            token_header = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "").strip()
+            if token_header != WEBHOOK_SECRET:
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error": "Forbidden: invalid webhook secret token"}')
+                return
+
         content_length = int(self.headers.get("Content-Length", 0))
         post_data = self.rfile.read(content_length)
 
